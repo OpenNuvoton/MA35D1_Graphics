@@ -64,6 +64,32 @@ void EtnaBlittablePlatformPixmap::setGlobalContext(etna2d_context *ctx,
     ETNA_DBG << "global context set: ctx=" << ctx << "dev=" << dev;
 }
 
+/* Scratch surface for source-over stretches (see drawPixmapOpacity).  etna2d_stretch()
+ * is a point-sampled copy with no blending, so a translucent source is stretched into
+ * this surface first and then blended onto the destination.  Grown on demand, shared
+ * by all blittables (single GUI thread), never shrunk. */
+static etna2d_surface *s_scratch = nullptr;
+static int s_scratchW = 0, s_scratchH = 0;
+static const qint64 kScratchMaxPixels = 4 * 1024 * 1024;
+
+static etna2d_surface *scratchSurface(etna2d_context *ctx, etna2d_device *dev, int w, int h)
+{
+    if (s_scratch && s_scratchW >= w && s_scratchH >= h)
+        return s_scratch;
+    if (qint64(w) * h > kScratchMaxPixels)
+        return nullptr;
+    const int nw = qMax(w, s_scratchW), nh = qMax(h, s_scratchH);
+    etna2d_surface *ns = nullptr;
+    if (etna2d_surface_create(dev, nw, nh, &ns) != ETNA2D_OK || !ns)
+        return nullptr;
+    if (s_scratch) {
+        etna2d_finish(ctx);               /* queued ops may still use the old one */
+        etna2d_surface_destroy(s_scratch);
+    }
+    s_scratch = ns; s_scratchW = nw; s_scratchH = nh;
+    return s_scratch;
+}
+
 QBlittable *EtnaBlittablePlatformPixmap::createBlittable(const QSize &size,
                                                           bool /*alpha*/) const
 {
@@ -88,7 +114,6 @@ QBlittable *EtnaBlittablePlatformPixmap::createBlittable(const QSize &size,
 EtnaBlittable::EtnaBlittable(etna2d_context *ctx, etna2d_surface *surf)
     : QBlittable(QSize(etna2d_surface_width(surf), etna2d_surface_height(surf)),
                  Capabilities(SolidRectCapability
-                              | AlphaFillRectCapability
                               | SourcePixmapCapability
                               | SourceOverPixmapCapability
                               | SourceOverScaledPixmapCapability
@@ -120,6 +145,31 @@ EtnaBlittable::~EtnaBlittable()
  * QBlittable::unlock() skips etna2d_finish().  This avoids one ~2.5–3µs
  * GPU pipeline-drain stall per source sprite per frame.
  * ----------------------------------------------------------------------- */
+static const qint64 kOpaqueScanMaxPixels = 4 * 1024 * 1024;
+
+bool EtnaBlittable::isOpaque()
+{
+    if (m_opaqueKnown)
+        return m_opaque;
+    const int w = etna2d_surface_width(m_surf), h = etna2d_surface_height(m_surf);
+    bool opaque = false;
+    if (qint64(w) * h <= kOpaqueScanMaxPixels) {
+        QImage *img = lock();               /* finishes pending GPU writes, maps for CPU */
+        if (img && !img->isNull()) {
+            opaque = true;
+            for (int y = 0; y < h && opaque; ++y) {
+                const quint32 *px = reinterpret_cast<const quint32 *>(img->constScanLine(y));
+                for (int x = 0; x < w; ++x)
+                    if ((px[x] >> 24) != 0xff) { opaque = false; break; }
+            }
+        }
+        unlockForGpuRead();
+    }
+    m_opaque = opaque;
+    m_opaqueKnown = true;                  /* after lock(): doLock() clears the flag */
+    return m_opaque;
+}
+
 void EtnaBlittable::unlockForGpuRead()
 {
     if (!isLocked())
@@ -171,13 +221,53 @@ void EtnaBlittable::fillRect(const QRectF &rect, const QColor &color)
                   | (uint32_t(color.red())   << 16)
                   | (uint32_t(color.green())  <<  8)
                   | uint32_t(color.blue());
+    m_opaqueKnown = false;
     ETNA_DBG << "fillRect" << r << Qt::hex << argb;
     etna2d_fill(m_ctx, m_surf, r.x(), r.y(), r.width(), r.height(), argb);
     /* Note: NOT flushed here — deferred to doUnlock()/backingstore flush(). */
 }
 
 /* -----------------------------------------------------------------------
- * alphaFillRect — AlphaFillRectCapability
+ * CPU fallbacks.
+ *
+ * Qt's QBlitterPaintEngine decides GPU-or-raster BEFORE it calls a blittable
+ * method (from the declared Capabilities and the painter state).  Once one of
+ * our methods has been called Qt assumes the result is drawn, so a bare
+ * "return" or QBlittable::alphaFillRect() (a stub that only warns) leaves the
+ * pixels untouched.  Every case we cannot do on the GPU must therefore draw
+ * itself, through the CPU raster engine on the locked BO memory.
+ * Rects arrive already mapped to device space and clipped by Qt.
+ * ----------------------------------------------------------------------- */
+void EtnaBlittable::cpuFillRect(const QRectF &rect, const QColor &color,
+                                QPainter::CompositionMode cmode)
+{
+    QImage *dst = lock();
+    if (!dst || dst->isNull())
+        return;
+    QPainter p(dst);
+    p.setCompositionMode(cmode);
+    p.fillRect(rect, color);
+}
+
+void EtnaBlittable::cpuDrawPixmap(const QRectF &rect, const QPixmap &pixmap,
+                                  const QRectF &subrect,
+                                  QPainter::CompositionMode cmode, qreal opacity)
+{
+    /* Read the source first (maps it for the CPU), then lock the destination. */
+    const QImage src = pixmap.toImage();
+    QImage *dst = lock();
+    if (!dst || dst->isNull() || src.isNull())
+        return;
+    QPainter p(dst);
+    p.setCompositionMode(cmode);
+    p.setOpacity(opacity);
+    p.drawImage(rect, src, subrect);
+}
+
+/* -----------------------------------------------------------------------
+ * alphaFillRect — only reached if AlphaFillRectCapability is declared.
+ * It is NOT declared (the GC520 has no blended fill), so Qt draws translucent
+ * fills itself.  Kept as a safe implementation in case it is ever called.
  * ----------------------------------------------------------------------- */
 void EtnaBlittable::alphaFillRect(const QRectF &rect, const QColor &color,
                                    QPainter::CompositionMode cmode)
@@ -185,29 +275,11 @@ void EtnaBlittable::alphaFillRect(const QRectF &rect, const QColor &color,
     QRect r = rect.toRect();
     if (r.isEmpty())
         return;
-
     if (cmode == QPainter::CompositionMode_Source || color.alpha() == 255) {
-        /* Opaque source fill — same as fillRect. */
         fillRect(rect, color);
         return;
     }
-
-    if (cmode == QPainter::CompositionMode_SourceOver && color.alpha() == 0)
-        return; /* fully transparent: no-op */
-
-    if (cmode != QPainter::CompositionMode_SourceOver) {
-        /* Unsupported composition mode — fall back to raster. */
-        ETNA_DBG << "alphaFillRect: unsupported cmode" << cmode << "— raster fallback";
-        QBlittable::alphaFillRect(rect, color, cmode);
-        return;
-    }
-
-    /* SourceOver with translucent color: libetna2d has no direct
-     * "fill with SRC_OVER" operation; the raster fallback handles it
-     * correctly via doLock(). Translucent fills are rare in typical
-     * widget UIs (most fills are opaque), so this is not a hot path. */
-    ETNA_DBG << "alphaFillRect SourceOver translucent: raster fallback";
-    QBlittable::alphaFillRect(rect, color, cmode);
+    cpuFillRect(rect, color, cmode);
 }
 
 /* -----------------------------------------------------------------------
@@ -239,17 +311,19 @@ void EtnaBlittable::drawPixmapOpacity(const QRectF &rect, const QPixmap &pixmap,
     if (srcR.width()  < 1) srcR.setWidth(1);
     if (srcR.height() < 1) srcR.setHeight(1);
 
+    m_opaqueKnown = false;   /* this surface is about to be written */
     etna2d_surface *srcSurf = surfaceFromPixmap(pixmap);
     if (!srcSurf) {
-        /* Source is a raster pixmap — let Qt fall back to raster engine. */
-        ETNA_DBG << "drawPixmapOpacity: source is raster — fallback";
+        ETNA_DBG << "drawPixmapOpacity: source is raster — CPU draw";
+        cpuDrawPixmap(rect, pixmap, subrect, cmode, opacity);
         return;
     }
 
     /* GC520 PE only supports SRC and SRC_OVER.  For anything else, fall back. */
     if (cmode != QPainter::CompositionMode_SourceOver &&
         cmode != QPainter::CompositionMode_Source) {
-        ETNA_DBG << "drawPixmapOpacity: unsupported cmode" << cmode << "— fallback";
+        ETNA_DBG << "drawPixmapOpacity: unsupported cmode" << cmode << "— CPU draw";
+        cpuDrawPixmap(rect, pixmap, subrect, cmode, opacity);
         return;
     }
 
@@ -265,10 +339,9 @@ void EtnaBlittable::drawPixmapOpacity(const QRectF &rect, const QPixmap &pixmap,
              << "opacity=" << opacity;
 
     if (hasOpacity) {
-        /* Global opacity: premultiply source alpha by opacity.
-         * libetna2d has no direct opacity arg, so we'd need a temporary
-         * surface.  For v1 fall back to raster — opacity blits are rare. */
-        ETNA_DBG << "drawPixmapOpacity: opacity < 1.0 — raster fallback";
+        /* libetna2d has no global-opacity blend. */
+        ETNA_DBG << "drawPixmapOpacity: opacity < 1.0 — CPU draw";
+        cpuDrawPixmap(rect, pixmap, subrect, cmode, opacity);
         return;
     }
 
@@ -287,21 +360,47 @@ void EtnaBlittable::drawPixmapOpacity(const QRectF &rect, const QPixmap &pixmap,
          * destination rect (it has no source sub-rect param).
          *
          * If Qt is asking us to stretch a sub-rect of the source (srcR !=
-         * full source), we fall back to the CPU raster engine — it's an
+         * full source), we draw it with the CPU raster engine — it's an
          * uncommon case (drawPixmap with non-trivial srcRect + scale).
          * The common widget case (drawPixmap(dstRect, pm, pm.rect())) uses
-         * the full source so this fast path covers it. */
+         * the full source so this fast path covers it.
+         * etna2d_stretch() copies without blending, so source-over goes
+         * through a scratch surface (see scratchSurface()). */
         int sw = etna2d_surface_width(srcSurf);
         int sh = etna2d_surface_height(srcSurf);
         bool fullSrc = (srcR.x() == 0 && srcR.y() == 0 &&
                         srcR.width() == sw && srcR.height() == sh);
         if (fullSrc) {
-            etna2d_stretch(m_ctx, srcSurf, m_surf,
-                           dstR.x(), dstR.y(), dstR.width(), dstR.height());
+            EtnaBlittable *srcBl = static_cast<EtnaBlittablePlatformPixmap *>(pixmap.handle())->etnaBlittable();
+            if (!isOver || srcBl->isOpaque()) {
+                /* No alpha to blend: plain stretch (copy) is exact. */
+                etna2d_stretch(m_ctx, srcSurf, m_surf,
+                               dstR.x(), dstR.y(), dstR.width(), dstR.height());
+            } else {
+                /* Source-over: stretch alone would overwrite the destination
+                 * (no alpha).  Stretch into the scratch surface, then blend. */
+                etna2d_surface *tmp = nullptr;
+                const QRect surfR(0, 0, etna2d_surface_width(m_surf), etna2d_surface_height(m_surf));
+                const QRect vis = dstR.intersected(surfR);
+                if (vis.isEmpty())
+                    return;
+                if (dstR.width() > 0 && dstR.height() > 0)
+                    tmp = scratchSurface(m_ctx, EtnaBlittablePlatformPixmap::device(), dstR.width(), dstR.height());
+                if (!tmp) {
+                    ETNA_DBG << "drawPixmapOpacity: no scratch surface — CPU draw";
+                    cpuDrawPixmap(rect, pixmap, subrect, cmode, opacity);
+                    return;
+                }
+                etna2d_stretch(m_ctx, srcSurf, tmp, 0, 0, dstR.width(), dstR.height());
+                etna2d_blit(m_ctx,
+                            tmp, vis.x() - dstR.x(), vis.y() - dstR.y(),
+                            m_surf, vis.x(), vis.y(),
+                            vis.width(), vis.height(),
+                            ETNA2D_BLEND_SRC_OVER, ETNA2D_ROP_COPY);
+            }
         } else {
-            ETNA_DBG << "drawPixmapOpacity: stretch with sub-srcRect — raster fallback";
-            /* Returning without doing anything triggers Qt's raster fallback
-             * via doLock() automatically — no explicit call needed here. */
+            ETNA_DBG << "drawPixmapOpacity: stretch with sub-srcRect — CPU draw";
+            cpuDrawPixmap(rect, pixmap, subrect, cmode, opacity);
             return;
         }
     }
@@ -315,6 +414,7 @@ void EtnaBlittable::drawPixmapOpacity(const QRectF &rect, const QPixmap &pixmap,
  * ----------------------------------------------------------------------- */
 QImage *EtnaBlittable::doLock()
 {
+    m_opaqueKnown = false;   /* CPU may write */
     /* Finish any pending GPU work so CPU reads see up-to-date pixels. */
     etna2d_finish(m_ctx);
 

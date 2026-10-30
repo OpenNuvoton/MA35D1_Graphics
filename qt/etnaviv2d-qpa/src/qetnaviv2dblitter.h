@@ -48,12 +48,21 @@ public:
      * If the surface is not CPU-locked this is a no-op. */
     void unlockForGpuRead();
 
+    /* True if every pixel has alpha 0xff.  Scanned once per content version
+     * (cached; invalidated by any CPU lock or GPU write to this surface), and
+     * only for surfaces up to kOpaqueScanMaxPixels - bigger ones report false. */
+    bool isOpaque();
+
     /* --- QBlittable pure virtuals --- */
     void fillRect(const QRectF &rect, const QColor &color) override;
     void drawPixmap(const QRectF &rect, const QPixmap &pixmap,
                     const QRectF &subrect) override;
 
-    /* --- QBlittable optional virtuals (advertised in Capabilities) --- */
+    /* --- QBlittable optional virtuals (advertised in Capabilities) ---
+     * AlphaFillRectCapability is deliberately NOT declared (the GC520 has no
+     * blended fill), so Qt rasters translucent fills itself.  OpacityPixmap IS
+     * declared so Qt passes the composition mode (CompositionMode_Source needs
+     * it); painter opacity < 1 is then drawn by cpuDrawPixmap(). */
     void alphaFillRect(const QRectF &rect, const QColor &color,
                        QPainter::CompositionMode cmode) override;
     void drawPixmapOpacity(const QRectF &rect, const QPixmap &pixmap,
@@ -67,10 +76,20 @@ protected:
     void    doUnlock() override;
 
 private:
+    bool m_opaqueKnown = false;
+    bool m_opaque = false;
     /* Extract the etna2d_surface* from a pixmap that is backed by an
      * EtnaBlittable. Returns nullptr if the pixmap is a raster pixmap
      * (in which case drawPixmap/drawPixmapOpacity must fall back). */
     static etna2d_surface *surfaceFromPixmap(const QPixmap &pixmap);
+
+    /* CPU draws into the locked BO.  Qt does NOT fall back for us once a
+     * blittable method is entered, so unsupported cases must call these. */
+    void cpuFillRect(const QRectF &rect, const QColor &color,
+                     QPainter::CompositionMode cmode);
+    void cpuDrawPixmap(const QRectF &rect, const QPixmap &pixmap,
+                       const QRectF &subrect, QPainter::CompositionMode cmode,
+                       qreal opacity);
 
     /* Premultiply a QColor and return it as a packed ARGB32 uint32_t. */
 
@@ -93,6 +112,7 @@ public:
 
     /* Must be called once before any pixmap is allocated. */
     static void setGlobalContext(etna2d_context *ctx, etna2d_device *dev);
+    static etna2d_device *device() { return s_dev; }
 
     QBlittable *createBlittable(const QSize &size, bool alpha) const override;
 
