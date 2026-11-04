@@ -79,6 +79,7 @@ struct etna2d_surface {
 	uint32_t              stride;   /* bytes */
 	void                 *map;
 	int                   imported; /* from dma-buf: don't assume ownership sizing */
+	int                   fmt;      /* ETNA2D_FMT_*; 0 = ARGB8888 (default) */
 };
 
 struct etna2d_context {
@@ -94,6 +95,17 @@ static inline uint32_t align_up(uint32_t v, uint32_t a)
 {
 	return (v + a - 1) & ~(a - 1);
 }
+
+/* Pixel format of a surface -> DE format code, bytes per pixel. */
+static const struct { uint8_t de, bpp; } fmt_tab[ETNA2D_FMT_COUNT] = {
+	[ETNA2D_FMT_ARGB8888] = { DE_FORMAT_A8R8G8B8, 4 },
+	[ETNA2D_FMT_RGB565]   = { DE_FORMAT_R5G6B5,   2 },
+	[ETNA2D_FMT_XRGB8888] = { DE_FORMAT_X8R8G8B8, 4 },
+	[ETNA2D_FMT_ARGB1555] = { DE_FORMAT_A1R5G5B5, 2 },
+	[ETNA2D_FMT_ARGB4444] = { DE_FORMAT_A4R4G4B4, 2 },
+};
+static inline uint32_t de_fmt(const struct etna2d_surface *s) { return fmt_tab[s->fmt].de; }
+static inline uint32_t fmt_bpp(int fmt) { return fmt_tab[fmt].bpp; }
 
 /* ---------------------------------------------------------------------- */
 /* Low-level command emit (identical to the validated Phase 1 sequences)  */
@@ -213,15 +225,16 @@ static void op_begin(struct etna2d_context *ctx)
 }
 
 
-static void set_source(struct etna_cmd_stream *s,
-		       struct etna_bo *src, uint32_t src_stride,
-		       int src_w, int src_h, int src_x, int src_y)
+static void set_source(struct etna_cmd_stream *s, const struct etna2d_surface *sf,
+		       int src_x, int src_y)
 {
+	struct etna_bo *src = sf->bo; uint32_t src_stride = sf->stride;
+	int src_w = sf->w, src_h = sf->h;
 	ss(s, VIVS_DE_SRC_STRIDE, src_stride);
 	ss(s, VIVS_DE_SRC_ROTATION_CONFIG, 0);
 	ss(s, VIVS_DE_SRC_CONFIG,
-	   VIVS_DE_SRC_CONFIG_PE10_SOURCE_FORMAT(DE_FORMAT_A8R8G8B8) |
-	   VIVS_DE_SRC_CONFIG_SOURCE_FORMAT(DE_FORMAT_A8R8G8B8) |
+	   VIVS_DE_SRC_CONFIG_PE10_SOURCE_FORMAT(de_fmt(sf)) |
+	   VIVS_DE_SRC_CONFIG_SOURCE_FORMAT(de_fmt(sf)) |
 	   VIVS_DE_SRC_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
 	   VIVS_DE_SRC_CONFIG_LOCATION_MEMORY);
 	ss(s, VIVS_DE_SRC_ORIGIN,
@@ -331,13 +344,19 @@ uint64_t etna2d_device_features0(const struct etna2d_device *d) { return d ? d->
 int etna2d_surface_create(struct etna2d_device *dev, int w, int h,
 			  struct etna2d_surface **out)
 {
+	return etna2d_surface_create_fmt(dev, w, h, ETNA2D_FMT_ARGB8888, out);
+}
+
+int etna2d_surface_create_fmt(struct etna2d_device *dev, int w, int h, int fmt,
+			      struct etna2d_surface **out)
+{
 	struct etna2d_surface *s;
 	uint32_t stride, size;
 
-	if (!dev || !out || w <= 0 || h <= 0)
+	if (!dev || !out || w <= 0 || h <= 0 || fmt < 0 || fmt >= ETNA2D_FMT_COUNT)
 		return ETNA2D_EINVAL;
 
-	stride = align_up((uint32_t)w * 4u, ETNA2D_ALIGN);
+	stride = align_up((uint32_t)w * fmt_bpp(fmt), ETNA2D_ALIGN);
 	size   = stride * (uint32_t)h;
 
 	s = calloc(1, sizeof(*s));
@@ -354,6 +373,7 @@ int etna2d_surface_create(struct etna2d_device *dev, int w, int h,
 	s->w = w;
 	s->h = h;
 	s->stride = stride;
+	s->fmt = fmt;
 	LOG_DBG("surface %dx%d stride=%u size=%u handle=%u",
 		w, h, stride, size, etna_bo_handle(s->bo));
 	*out = s;
@@ -364,9 +384,19 @@ int etna2d_surface_from_dmabuf(struct etna2d_device *dev, int fd,
 			       int w, int h, uint32_t stride,
 			       struct etna2d_surface **out)
 {
+	return etna2d_surface_from_dmabuf_fmt(dev, fd, w, h, stride,
+					      ETNA2D_FMT_ARGB8888, out);
+}
+
+int etna2d_surface_from_dmabuf_fmt(struct etna2d_device *dev, int fd,
+				   int w, int h, uint32_t stride, int fmt,
+				   struct etna2d_surface **out)
+{
 	struct etna2d_surface *s;
 
-	if (!dev || !out || fd < 0 || w <= 0 || h <= 0 || stride < (uint32_t)w * 4u)
+	if (!dev || !out || fd < 0 || w <= 0 || h <= 0 ||
+	    fmt < 0 || fmt >= ETNA2D_FMT_COUNT ||
+	    stride < (uint32_t)w * fmt_bpp(fmt))
 		return ETNA2D_EINVAL;
 
 	s = calloc(1, sizeof(*s));
@@ -384,6 +414,7 @@ int etna2d_surface_from_dmabuf(struct etna2d_device *dev, int fd,
 	s->w = w;
 	s->h = h;
 	s->stride = stride;
+	s->fmt = fmt;
 	s->imported = 1;
 	LOG_DBG("surface(imported) %dx%d stride=%u handle=%u",
 		w, h, stride, etna_bo_handle(s->bo));
@@ -403,6 +434,7 @@ void etna2d_surface_destroy(struct etna2d_surface *s)
 int      etna2d_surface_width(const struct etna2d_surface *s)  { return s ? s->w : 0; }
 int      etna2d_surface_height(const struct etna2d_surface *s) { return s ? s->h : 0; }
 uint32_t etna2d_surface_stride(const struct etna2d_surface *s) { return s ? s->stride : 0; }
+int      etna2d_surface_format(const struct etna2d_surface *s) { return s ? s->fmt : 0; }
 
 void *etna2d_surface_map(struct etna2d_surface *s)
 {
@@ -525,7 +557,7 @@ int etna2d_fill(struct etna2d_context *ctx, struct etna2d_surface *dst,
 	ss(s, VIVS_DE_DEST_STRIDE, dst->stride);
 	ss(s, VIVS_DE_DEST_ROTATION_CONFIG, 0);
 	ss(s, VIVS_DE_DEST_CONFIG,
-	   VIVS_DE_DEST_CONFIG_FORMAT(DE_FORMAT_A8R8G8B8) |
+	   VIVS_DE_DEST_CONFIG_FORMAT(de_fmt(dst)) |
 	   VIVS_DE_DEST_CONFIG_COMMAND_CLEAR |
 	   VIVS_DE_DEST_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
 	   VIVS_DE_DEST_CONFIG_TILED_DISABLE |
@@ -545,6 +577,8 @@ int etna2d_fill(struct etna2d_context *ctx, struct etna2d_surface *dst,
 	ss(s, VIVS_DE_SRC_ROTATION_HEIGHT, 0);
 	ss(s, VIVS_DE_ROT_ANGLE, 0);
 
+	/* The clear value is always ARGB8888: the DE converts it to the destination format
+	 * (packing it to 565 here gave a pink background). */
 	ss(s, VIVS_DE_CLEAR_PIXEL_VALUE32, argb);
 	ss(s, VIVS_DE_CLEAR_BYTE_MASK, 0xff);
 	ss(s, VIVS_DE_CLEAR_PIXEL_VALUE_LOW, argb);
@@ -595,7 +629,7 @@ int etna2d_blit(struct etna2d_context *ctx,
 		sx, sy, dx, dy, w, h, blend, rop);
 
 	op_begin(ctx);
-	set_source(s, src->bo, src->stride, src->w, src->h, sx, sy);
+	set_source(s, src, sx, sy);
 	ss(s, VIVS_DE_STRETCH_FACTOR_LOW, 0);
 	ss(s, VIVS_DE_STRETCH_FACTOR_HIGH, 0);
 	ss_reloc(s, VIVS_DE_DEST_ADDRESS, dst->bo,
@@ -603,7 +637,7 @@ int etna2d_blit(struct etna2d_context *ctx,
 	ss(s, VIVS_DE_DEST_STRIDE, dst->stride);
 	ss(s, VIVS_DE_DEST_ROTATION_CONFIG, 0);
 	ss(s, VIVS_DE_DEST_CONFIG,
-	   VIVS_DE_DEST_CONFIG_FORMAT(DE_FORMAT_A8R8G8B8) |
+	   VIVS_DE_DEST_CONFIG_FORMAT(de_fmt(dst)) |
 	   VIVS_DE_DEST_CONFIG_COMMAND_BIT_BLT |
 	   VIVS_DE_DEST_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
 	   VIVS_DE_DEST_CONFIG_TILED_DISABLE |
@@ -697,14 +731,14 @@ int etna2d_stretch(struct etna2d_context *ctx,
 		src->w, src->h, dx, dy, dw, dh, fx, fy);
 
 	op_begin(ctx);
-	set_source(s, src->bo, src->stride, src->w, src->h, 0, 0);
+	set_source(s, src, 0, 0);
 	ss(s, VIVS_DE_STRETCH_FACTOR_LOW,  VIVS_DE_STRETCH_FACTOR_LOW_X(fx));
 	ss(s, VIVS_DE_STRETCH_FACTOR_HIGH, VIVS_DE_STRETCH_FACTOR_HIGH_Y(fy));
 	ss_reloc(s, VIVS_DE_DEST_ADDRESS, dst->bo, ETNA_RELOC_WRITE);
 	ss(s, VIVS_DE_DEST_STRIDE, dst->stride);
 	ss(s, VIVS_DE_DEST_ROTATION_CONFIG, 0);
 	ss(s, VIVS_DE_DEST_CONFIG,
-	   VIVS_DE_DEST_CONFIG_FORMAT(DE_FORMAT_A8R8G8B8) |
+	   VIVS_DE_DEST_CONFIG_FORMAT(de_fmt(dst)) |
 	   VIVS_DE_DEST_CONFIG_COMMAND_STRETCH_BLT |
 	   VIVS_DE_DEST_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
 	   VIVS_DE_DEST_CONFIG_TILED_DISABLE |
@@ -741,12 +775,12 @@ static void stretch_batch_state(struct etna_cmd_stream *s,
 				struct etna2d_surface *src,
 				struct etna2d_surface *dst)
 {
-	set_source(s, src->bo, src->stride, src->w, src->h, 0, 0);
+	set_source(s, src, 0, 0);
 	ss_reloc(s, VIVS_DE_DEST_ADDRESS, dst->bo, ETNA_RELOC_WRITE);
 	ss(s, VIVS_DE_DEST_STRIDE, dst->stride);
 	ss(s, VIVS_DE_DEST_ROTATION_CONFIG, 0);
 	ss(s, VIVS_DE_DEST_CONFIG,
-	   VIVS_DE_DEST_CONFIG_FORMAT(DE_FORMAT_A8R8G8B8) |
+	   VIVS_DE_DEST_CONFIG_FORMAT(de_fmt(dst)) |
 	   VIVS_DE_DEST_CONFIG_COMMAND_STRETCH_BLT |
 	   VIVS_DE_DEST_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
 	   VIVS_DE_DEST_CONFIG_TILED_DISABLE |

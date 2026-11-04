@@ -100,6 +100,26 @@ int etna2d_surface_from_dmabuf(struct etna2d_device *dev, int fd,
 			       int w, int h, uint32_t stride,
 			       struct etna2d_surface **out);
 
+/* Surface pixel format (matches the DC / DRM formats). Surfaces made by
+ * etna2d_surface_create() are always ARGB8888. Imported (dma-buf) surfaces can
+ * be any of these (e.g. a 16 bpp scan-out ring); the DE converts the
+ * ARGB8888 source to the destination format on blit / blend / fill. */
+enum {
+	ETNA2D_FMT_ARGB8888 = 0,  /* DRM_FORMAT_ARGB8888 */
+	ETNA2D_FMT_RGB565,        /* DRM_FORMAT_RGB565   */
+	ETNA2D_FMT_XRGB8888,      /* DRM_FORMAT_XRGB8888 */
+	ETNA2D_FMT_ARGB1555,      /* DRM_FORMAT_ARGB1555 */
+	ETNA2D_FMT_ARGB4444,      /* DRM_FORMAT_ARGB4444 */
+	ETNA2D_FMT_COUNT
+};
+/* Allocate a surface of the given format (stride aligned to 64 B). */
+int etna2d_surface_create_fmt(struct etna2d_device *dev, int w, int h, int fmt,
+			      struct etna2d_surface **out);
+int etna2d_surface_from_dmabuf_fmt(struct etna2d_device *dev, int fd,
+				   int w, int h, uint32_t stride, int fmt,
+				   struct etna2d_surface **out);
+int etna2d_surface_format(const struct etna2d_surface *s);
+
 void etna2d_surface_destroy(struct etna2d_surface *s);
 
 /* Accessors. */
