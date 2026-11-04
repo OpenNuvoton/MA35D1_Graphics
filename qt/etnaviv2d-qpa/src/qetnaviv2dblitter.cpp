@@ -16,6 +16,7 @@
  * Reference: src/plugins/platforms/directfb/qdirectfbblitter.cpp
  */
 #include "qetnaviv2dblitter.h"
+#include "qetnaviv2dformat.h"
 
 #include <QDebug>
 #include <QtGui/private/qpixmap_blitter_p.h>
@@ -91,14 +92,15 @@ static etna2d_surface *scratchSurface(etna2d_context *ctx, etna2d_device *dev, i
 }
 
 QBlittable *EtnaBlittablePlatformPixmap::createBlittable(const QSize &size,
-                                                          bool /*alpha*/) const
+                                                          bool alpha) const
 {
     if (!s_ctx || !s_dev) {
         ETNA_WARN << "createBlittable called before setGlobalContext — returning nullptr";
         return nullptr;
     }
     etna2d_surface *surf = nullptr;
-    int rc = etna2d_surface_create(s_dev, size.width(), size.height(), &surf);
+    int rc = etna2d_surface_create_fmt(s_dev, size.width(), size.height(),
+                                       etnaStorageFmt(alpha).etna, &surf);
     if (rc != ETNA2D_OK || !surf) {
         ETNA_WARN << "etna2d_surface_create failed rc=" << rc
                   << "size=" << size;
@@ -153,14 +155,25 @@ bool EtnaBlittable::isOpaque()
         return m_opaque;
     const int w = etna2d_surface_width(m_surf), h = etna2d_surface_height(m_surf);
     bool opaque = false;
+    if (!etnaFmtByEtna(etna2d_surface_format(m_surf)).alpha) {
+        m_opaque = true; m_opaqueKnown = true;    /* no alpha channel: always opaque */
+        return true;
+    }
+    const bool px16 = etnaFmtByEtna(etna2d_surface_format(m_surf)).bpp == 16;
     if (qint64(w) * h <= kOpaqueScanMaxPixels) {
         QImage *img = lock();               /* finishes pending GPU writes, maps for CPU */
         if (img && !img->isNull()) {
             opaque = true;
             for (int y = 0; y < h && opaque; ++y) {
-                const quint32 *px = reinterpret_cast<const quint32 *>(img->constScanLine(y));
-                for (int x = 0; x < w; ++x)
-                    if ((px[x] >> 24) != 0xff) { opaque = false; break; }
+                if (px16) {                       /* ARGB4444: alpha = top nibble */
+                    const quint16 *px = reinterpret_cast<const quint16 *>(img->constScanLine(y));
+                    for (int x = 0; x < w; ++x)
+                        if ((px[x] >> 12) != 0xf) { opaque = false; break; }
+                } else {
+                    const quint32 *px = reinterpret_cast<const quint32 *>(img->constScanLine(y));
+                    for (int x = 0; x < w; ++x)
+                        if ((px[x] >> 24) != 0xff) { opaque = false; break; }
+                }
             }
         }
         unlockForGpuRead();
@@ -432,8 +445,9 @@ QImage *EtnaBlittable::doLock()
 
     /* Format_ARGB32_Premultiplied matches the GC520 premult blend model.
      * Stride must be the real BO stride (NOT w*4 — the DE may pad rows). */
-    m_lockImage = QImage(static_cast<uchar *>(ptr), w, h, stride,
-                         QImage::Format_ARGB32_Premultiplied);
+    QImage::Format qf = etnaFmtByEtna(etna2d_surface_format(m_surf)).qfmt;
+    if (qf == QImage::Format_Invalid) qf = QImage::Format_ARGB32_Premultiplied;
+    m_lockImage = QImage(static_cast<uchar *>(ptr), w, h, stride, qf);
     return &m_lockImage;
 }
 
