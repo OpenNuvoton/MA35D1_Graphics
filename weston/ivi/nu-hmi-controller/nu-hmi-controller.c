@@ -33,6 +33,7 @@
  */
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -54,6 +55,11 @@ struct nuvoton_layer {
     uint32_t                  id;
     int32_t                   render_order;
     struct ivi_layout_layer  *layout_layer;
+
+    /* Optional placement (weston.ini: center=true, or x=/y=). Surfaces keep
+     * their buffer size (display has no scaler); only the position moves. */
+    bool                      center;
+    int32_t                   x, y;
 
     /* The single surface currently occupying this layer, or NULL. This
      * kiosk controller assigns exactly one surface per configured layer
@@ -92,6 +98,28 @@ find_layer_by_id(struct nu_hmi_controller *hmi, uint32_t id)
 }
 
 static void
+place_surface(struct nu_hmi_controller *hmi,
+              struct ivi_layout_surface *ivisurf, int32_t w, int32_t h)
+{
+    struct nuvoton_layer *l = find_layer_by_id(hmi,
+                                  hmi->ivi->get_id_of_surface(ivisurf));
+    int32_t x = 0, y = 0;
+
+    if (l && l->center) {
+        struct weston_output *o = wl_container_of(
+            hmi->compositor->output_list.next, o, link);
+        x = (o->current_mode->width - w) / 2;
+        y = (o->current_mode->height - h) / 2;
+    } else if (l) {
+        x = l->x;
+        y = l->y;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    hmi->ivi->surface_set_destination_rectangle(ivisurf, x, y, w, h);
+}
+
+static void
 set_surface_geometry_fullscreen(struct nu_hmi_controller *hmi,
                                 struct ivi_layout_surface *ivisurf)
 {
@@ -113,7 +141,7 @@ set_surface_geometry_fullscreen(struct nu_hmi_controller *hmi,
     }
 
     hmi->ivi->surface_set_source_rectangle(ivisurf, 0, 0, w, h);
-    hmi->ivi->surface_set_destination_rectangle(ivisurf, 0, 0, w, h);
+    place_surface(hmi, ivisurf, w, h);
     hmi->ivi->surface_set_visibility(ivisurf, true);
 }
 
@@ -150,8 +178,7 @@ on_surface_configured(struct wl_listener *listener, void *data)
         if (ws && ws->width > 0 && ws->height > 0) {
             hmi->ivi->surface_set_source_rectangle(ivisurf, 0, 0,
                                                    ws->width, ws->height);
-            hmi->ivi->surface_set_destination_rectangle(ivisurf, 0, 0,
-                                                        ws->width, ws->height);
+            place_surface(hmi, ivisurf, ws->width, ws->height);
         }
         hmi->ivi->commit_changes();
         return;
@@ -324,6 +351,15 @@ read_layer_config(struct nu_hmi_controller *hmi, struct weston_compositor *ec)
             continue;
         }
         hmi->layers[n].id           = id;
+        {
+            int32_t c = 0, x = 0, y = 0;
+            weston_config_section_get_int(section, "center", &c, 0);
+            weston_config_section_get_int(section, "x", &x, 0);
+            weston_config_section_get_int(section, "y", &y, 0);
+            hmi->layers[n].center = c != 0;
+            hmi->layers[n].x = x;
+            hmi->layers[n].y = y;
+        }
         hmi->layers[n].render_order = render_order;
         ++n;
     }
