@@ -110,6 +110,7 @@ enum {
 	ETNA2D_FMT_XRGB8888,      /* DRM_FORMAT_XRGB8888 */
 	ETNA2D_FMT_ARGB1555,      /* DRM_FORMAT_ARGB1555 */
 	ETNA2D_FMT_ARGB4444,      /* DRM_FORMAT_ARGB4444 */
+	ETNA2D_FMT_A8,            /* 8-bit coverage mask (glyph source) */
 	ETNA2D_FMT_COUNT
 };
 /* Allocate a surface of the given format (stride aligned to 64 B). */
@@ -147,6 +148,20 @@ int  etna2d_surface_create_ex(struct etna2d_device *dev, int w, int h, int fmt,
  * Works for WC surfaces too (then it is just the per-surface wait). */
 int  etna2d_surface_cpu_begin(struct etna2d_context *ctx, struct etna2d_surface *s);
 int  etna2d_surface_is_cached(const struct etna2d_surface *s);
+
+/* Source-over blit of a premultiplied ARGB source with a global opacity (0..255). */
+int  etna2d_blit_opacity(struct etna2d_context *ctx, struct etna2d_surface *src, int sx, int sy,
+			 struct etna2d_surface *dst, int dx, int dy, int w, int h, unsigned alpha);
+/* Coloured coverage mask: blend `argb` (straight, non-premultiplied) through an ETNA2D_FMT_A8
+ * source onto dst (glyph / text drawing). */
+int  etna2d_mask_blit(struct etna2d_context *ctx, struct etna2d_surface *mask, int sx, int sy,
+		      struct etna2d_surface *dst, int dx, int dy, int w, int h, uint32_t argb);
+
+/* Many mask blits with one colour into one destination (glyph runs): state is emitted once. */
+struct etna2d_mask_rect { int sx, sy, dx, dy, w, h; };
+int  etna2d_mask_blit_n(struct etna2d_context *ctx, struct etna2d_surface *mask,
+			struct etna2d_surface *dst, uint32_t argb,
+			const struct etna2d_mask_rect *r, int n);
 
 /* ---------------------------------------------------------------------- */
 /* Context (batched command stream)                                       */

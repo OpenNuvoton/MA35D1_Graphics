@@ -107,6 +107,7 @@ static const struct { uint8_t de, bpp; } fmt_tab[ETNA2D_FMT_COUNT] = {
 	[ETNA2D_FMT_XRGB8888] = { DE_FORMAT_X8R8G8B8, 4 },
 	[ETNA2D_FMT_ARGB1555] = { DE_FORMAT_A1R5G5B5, 2 },
 	[ETNA2D_FMT_ARGB4444] = { DE_FORMAT_A4R4G4B4, 2 },
+	[ETNA2D_FMT_A8]       = { DE_FORMAT_A8,       1 },
 };
 static inline uint32_t de_fmt(const struct etna2d_surface *s) { return fmt_tab[s->fmt].de; }
 static inline uint32_t fmt_bpp(int fmt) { return fmt_tab[fmt].bpp; }
@@ -920,5 +921,177 @@ int etna2d_stretch_batch(struct etna2d_context *ctx,
 		ctx->pending++, ctx->dirty = 1;
 		since_flush++;
 	}
+	return ETNA2D_OK;
+}
+
+/* 1:1 blit with raw alpha-blend registers (all values are written verbatim to the VIVS_DE_ALPHA_CONTROL /
+ * ALPHA_MODES / COLOR_MULTIPLY_MODES / GLOBAL_SRC_COLOR / GLOBAL_DEST_COLOR registers). */
+static int blit_alpha(struct etna2d_context *ctx, struct etna2d_surface *src, int sx, int sy,
+		    struct etna2d_surface *dst, int dx, int dy, int w, int h,
+		    uint32_t alpha_control, uint32_t alpha_modes, uint32_t cm_modes,
+		    uint32_t global_src, uint32_t global_dst)
+{
+	struct etna_cmd_stream *s;
+	if (!ctx || !src || !dst || w <= 0 || h <= 0)
+		return ETNA2D_EINVAL;
+	/* clip like etna2d_blit(): the DE has no bounds check on source or destination */
+	if (dx < 0 || dy < 0 || sx < 0 || sy < 0 ||
+	    dx >= dst->w || dy >= dst->h || sx >= src->w || sy >= src->h)
+		return ETNA2D_OK;
+	if (dx + w > dst->w) w = dst->w - dx;
+	if (dy + h > dst->h) h = dst->h - dy;
+	if (sx + w > src->w) w = src->w - sx;
+	if (sy + h > src->h) h = src->h - sy;
+	if (w <= 0 || h <= 0)
+		return ETNA2D_OK;
+	s = ctx->stream;
+	op_begin(ctx);
+	set_source(s, src, sx, sy);
+	ss(s, VIVS_DE_STRETCH_FACTOR_LOW, 0);
+	ss(s, VIVS_DE_STRETCH_FACTOR_HIGH, 0);
+	ss_reloc(s, VIVS_DE_DEST_ADDRESS, dst->bo, ETNA_RELOC_READ | ETNA_RELOC_WRITE);
+	ss(s, VIVS_DE_DEST_STRIDE, dst->stride);
+	ss(s, VIVS_DE_DEST_ROTATION_CONFIG, 0);
+	ss(s, VIVS_DE_DEST_CONFIG,
+	   VIVS_DE_DEST_CONFIG_FORMAT(de_fmt(dst)) |
+	   VIVS_DE_DEST_CONFIG_COMMAND_BIT_BLT |
+	   VIVS_DE_DEST_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
+	   VIVS_DE_DEST_CONFIG_TILED_DISABLE |
+	   VIVS_DE_DEST_CONFIG_MINOR_TILED_DISABLE);
+	ss(s, VIVS_DE_ROP, VIVS_DE_ROP_ROP_FG(0xcc) | VIVS_DE_ROP_ROP_BG(0xcc) | VIVS_DE_ROP_TYPE_ROP4);
+	ss(s, VIVS_DE_CLIP_TOP_LEFT, VIVS_DE_CLIP_TOP_LEFT_X(dx) | VIVS_DE_CLIP_TOP_LEFT_Y(dy));
+	ss(s, VIVS_DE_CLIP_BOTTOM_RIGHT, VIVS_DE_CLIP_BOTTOM_RIGHT_X(dx + w) | VIVS_DE_CLIP_BOTTOM_RIGHT_Y(dy + h));
+	ss(s, VIVS_DE_CONFIG, 0);
+	ss(s, VIVS_DE_SRC_ORIGIN_FRACTION, 0);
+	ss(s, VIVS_DE_ALPHA_CONTROL, alpha_control);
+	ss(s, VIVS_DE_ALPHA_MODES, alpha_modes);
+	ss(s, VIVS_DE_DEST_ROTATION_HEIGHT, 0);
+	ss(s, VIVS_DE_SRC_ROTATION_HEIGHT, 0);
+	ss(s, VIVS_DE_ROT_ANGLE, 0);
+	pe_reset(s);
+	/* pe_reset zeroes these; set them after it */
+	ss(s, VIVS_DE_GLOBAL_SRC_COLOR, global_src);
+	ss(s, VIVS_DE_GLOBAL_DEST_COLOR, global_dst);
+	ss(s, VIVS_DE_COLOR_MULTIPLY_MODES, cm_modes);
+	draw_2d_rect(s, dx, dy, dx + w, dy + h);
+	op_tail(s);
+	ctx->pending++, ctx->dirty = 1;
+	return ETNA2D_OK;
+}
+
+/* Probed on GC520: SRC_OVER with the source scaled by a global
+ * alpha.  ALPHA_MODES: src blend ONE, dst blend INVERSED, global src alpha SCALED (source alpha *
+ * global alpha, which also scales the inverse for the destination); COLOR_MULTIPLY: source colour
+ * * global alpha.  Global alpha is the top byte of GLOBAL_SRC_COLOR. */
+#define ALPHA_MODES_OVER_GLOBAL (VIVS_DE_ALPHA_MODES_SRC_BLENDING_MODE(DE_BLENDMODE_ONE) |      \
+				 VIVS_DE_ALPHA_MODES_DST_BLENDING_MODE(DE_BLENDMODE_INVERSED) | \
+				 VIVS_DE_ALPHA_MODES_GLOBAL_SRC_ALPHA_MODE_SCALED)
+
+int etna2d_blit_opacity(struct etna2d_context *ctx, struct etna2d_surface *src, int sx, int sy,
+			struct etna2d_surface *dst, int dx, int dy, int w, int h, unsigned alpha)
+{
+	if (alpha > 255)
+		alpha = 255;
+	return blit_alpha(ctx, src, sx, sy, dst, dx, dy, w, h,
+			       VIVS_DE_ALPHA_CONTROL_ENABLE_ON, ALPHA_MODES_OVER_GLOBAL,
+			       VIVS_DE_COLOR_MULTIPLY_MODES_SRC_GLOBAL_PREMULTIPLY_ALPHA,
+			       (uint32_t)alpha << 24, 0);
+}
+
+/* Coloured coverage mask (glyph): the colour comes from GLOBAL_SRC_COLOR (straight ARGB), the
+ * A8 source supplies the per-pixel coverage m; result = colour * (a*m) + dst * (1 - a*m) on all four
+ * channels (a = colour alpha), i.e. a premultiplied source-over, also onto a translucent destination.
+ * ALPHA_MODES: src blend ONE, dst INVERSED, global alpha SCALED (coverage * a);
+ * COLOR_MULTIPLY: SRC_PREMULTIPLY (colour * coverage) + SRC_GLOBAL_PREMULTIPLY_ALPHA (* a).
+ * Probed: max error 2/255 on rgb and alpha for any destination alpha.
+ * NB: src blend NORMAL (colour * alpha via the blend factor) is right on rgb but squares the alpha
+ * channel (a*a), which breaks drawing into an ARGB pixmap. */
+#define MASK_ALPHA_MODES (VIVS_DE_ALPHA_MODES_SRC_BLENDING_MODE(DE_BLENDMODE_ONE) |             \
+			  VIVS_DE_ALPHA_MODES_DST_BLENDING_MODE(DE_BLENDMODE_INVERSED) |        \
+			  VIVS_DE_ALPHA_MODES_GLOBAL_SRC_ALPHA_MODE_SCALED)
+#define MASK_CM_MODES    (VIVS_DE_COLOR_MULTIPLY_MODES_SRC_PREMULTIPLY_ENABLE |                   \
+			  VIVS_DE_COLOR_MULTIPLY_MODES_SRC_GLOBAL_PREMULTIPLY_ALPHA)
+
+int etna2d_mask_blit(struct etna2d_context *ctx, struct etna2d_surface *mask, int sx, int sy,
+		     struct etna2d_surface *dst, int dx, int dy, int w, int h, uint32_t argb)
+{
+	return blit_alpha(ctx, mask, sx, sy, dst, dx, dy, w, h,
+			       VIVS_DE_ALPHA_CONTROL_ENABLE_ON, MASK_ALPHA_MODES, MASK_CM_MODES, argb, 0);
+}
+
+/* Batched coloured-mask blits (text): the DE state (source/destination/alpha configuration and the
+ * colour) is emitted once; each rect then costs only SRC_ORIGIN + CLIP + DRAW_2D.  A command stream
+ * that fills up mid-batch is submitted and the state is emitted again at the start of the next one. */
+static void mask_setup(struct etna2d_context *ctx, struct etna2d_surface *mask,
+		       struct etna2d_surface *dst, uint32_t argb)
+{
+	struct etna_cmd_stream *s = ctx->stream;
+	op_begin(ctx);
+	set_source(s, mask, 0, 0);
+	ss(s, VIVS_DE_STRETCH_FACTOR_LOW, 0);
+	ss(s, VIVS_DE_STRETCH_FACTOR_HIGH, 0);
+	ss_reloc(s, VIVS_DE_DEST_ADDRESS, dst->bo, ETNA_RELOC_READ | ETNA_RELOC_WRITE);
+	ss(s, VIVS_DE_DEST_STRIDE, dst->stride);
+	ss(s, VIVS_DE_DEST_ROTATION_CONFIG, 0);
+	ss(s, VIVS_DE_DEST_CONFIG,
+	   VIVS_DE_DEST_CONFIG_FORMAT(de_fmt(dst)) |
+	   VIVS_DE_DEST_CONFIG_COMMAND_BIT_BLT |
+	   VIVS_DE_DEST_CONFIG_SWIZZLE(DE_SWIZZLE_ARGB) |
+	   VIVS_DE_DEST_CONFIG_TILED_DISABLE |
+	   VIVS_DE_DEST_CONFIG_MINOR_TILED_DISABLE);
+	ss(s, VIVS_DE_ROP, VIVS_DE_ROP_ROP_FG(0xcc) | VIVS_DE_ROP_ROP_BG(0xcc) | VIVS_DE_ROP_TYPE_ROP4);
+	ss(s, VIVS_DE_CONFIG, 0);
+	ss(s, VIVS_DE_SRC_ORIGIN_FRACTION, 0);
+	ss(s, VIVS_DE_ALPHA_CONTROL, VIVS_DE_ALPHA_CONTROL_ENABLE_ON);
+	ss(s, VIVS_DE_ALPHA_MODES, MASK_ALPHA_MODES);
+	ss(s, VIVS_DE_DEST_ROTATION_HEIGHT, 0);
+	ss(s, VIVS_DE_SRC_ROTATION_HEIGHT, 0);
+	ss(s, VIVS_DE_ROT_ANGLE, 0);
+	pe_reset(s);
+	ss(s, VIVS_DE_GLOBAL_SRC_COLOR, argb);
+	ss(s, VIVS_DE_COLOR_MULTIPLY_MODES, MASK_CM_MODES);
+}
+
+int etna2d_mask_blit_n(struct etna2d_context *ctx, struct etna2d_surface *mask,
+		       struct etna2d_surface *dst, uint32_t argb,
+		       const struct etna2d_mask_rect *r, int n)
+{
+	struct etna_cmd_stream *s;
+	int setup = 0;
+
+	if (!ctx || !mask || !dst || (n > 0 && !r))
+		return ETNA2D_EINVAL;
+	s = ctx->stream;
+	for (int i = 0; i < n; i++) {
+		int sx = r[i].sx, sy = r[i].sy, dx = r[i].dx, dy = r[i].dy, w = r[i].w, h = r[i].h;
+		uint32_t before;
+
+		if (w <= 0 || h <= 0 || dx < 0 || dy < 0 || sx < 0 || sy < 0 ||
+		    dx >= dst->w || dy >= dst->h || sx >= mask->w || sy >= mask->h)
+			continue;
+		if (dx + w > dst->w) w = dst->w - dx;
+		if (dy + h > dst->h) h = dst->h - dy;
+		if (sx + w > mask->w) w = mask->w - sx;
+		if (sy + h > mask->h) h = mask->h - sy;
+		if (w <= 0 || h <= 0)
+			continue;
+		if (!setup) {
+			mask_setup(ctx, mask, dst, argb);
+			setup = 1;
+		}
+		before = etna_cmd_stream_offset(s);
+		etna_cmd_stream_reserve(s, 32);
+		if (etna_cmd_stream_offset(s) < before) {   /* auto-flushed: state is gone, emit it again */
+			ctx->pending = 0;
+			mask_setup(ctx, mask, dst, argb);
+		}
+		ss(s, VIVS_DE_SRC_ORIGIN, VIVS_DE_SRC_ORIGIN_X(sx) | VIVS_DE_SRC_ORIGIN_Y(sy));
+		ss(s, VIVS_DE_CLIP_TOP_LEFT, VIVS_DE_CLIP_TOP_LEFT_X(dx) | VIVS_DE_CLIP_TOP_LEFT_Y(dy));
+		ss(s, VIVS_DE_CLIP_BOTTOM_RIGHT, VIVS_DE_CLIP_BOTTOM_RIGHT_X(dx + w) | VIVS_DE_CLIP_BOTTOM_RIGHT_Y(dy + h));
+		draw_2d_rect(s, dx, dy, dx + w, dy + h);
+		op_tail(s);
+	}
+	if (setup)
+		ctx->pending++, ctx->dirty = 1;
 	return ETNA2D_OK;
 }
