@@ -129,6 +129,15 @@ public:
      * Returns false if BO allocation or dmabuf export fails. */
     bool allocateRing();
 
+    /* current ring size, and re-create the ring at another size (window / output
+     * resize).  Returns true when the ring has that size afterwards. */
+    QSize ringSize() const { return m_ringSize; }
+    bool resizeRing(const QSize &size);
+
+    /* Called (GUI thread) when wl_output reports a new current mode after connect and the
+     * size is not pinned by QT_IVI_GEOMETRY.  Args: new output size, physical size in mm. */
+    void setOutputHook(std::function<void(const QRect &, const QSizeF &)> hook) { m_outputHook = std::move(hook); }
+
     /* Called from BackingStore::flush() after the blitter has rendered into
      * the current free ring BO.  Marks the surface dirty; the frame callback
      * fires the actual attach+commit.  On the very first call (no pending
@@ -151,6 +160,9 @@ public:
     /* Disconnect and free all Wayland and BO resources. */
     void disconnect();
     QSize defaultSize() const;
+    void applyOutputSize();
+    bool allocRingSized(int w, int h);
+    void freeRing();
     static void outputGeometry(void *, wl_output *, int32_t, int32_t, int32_t, int32_t, int32_t,
                                const char *, const char *, int32_t transform);
     static void outputMode(void *, wl_output *, uint32_t flags, int32_t w, int32_t h, int32_t);
@@ -339,6 +351,7 @@ private:
     /* ---- BO ring ---- */
     ArgbBo   m_ring[WL_RING_SIZE];
     int      m_currentSlot = 0;   // slot last handed to the blitter
+    QSize    m_ringSize;          // size the ring was allocated at (null = no ring)
 
     /* ---- State ---- */
     etna2d_device *m_etnadev   = nullptr;
@@ -348,6 +361,7 @@ private:
     bool           m_configured        = false; // xdg_surface configure received
     bool           m_dirty             = false; // commitFrame() called, waiting for frame cb
     std::function<void()> m_releaseHook;
+    std::function<void(const QRect &, const QSizeF &)> m_outputHook;
     QRegion        m_commitDamage;      // union of flushed regions since the last attach/commit
     int            m_pendingCommitSlot = -1;    // slot to attach on next frame cb
 

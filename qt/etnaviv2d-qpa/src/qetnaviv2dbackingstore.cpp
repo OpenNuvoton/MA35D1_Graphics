@@ -259,6 +259,18 @@ void QEtnaviv2dBackingStore::flush(QWindow * /*window*/,
 
     /* ---- Wayland mode: blit into the ring BO, hand off to transport ---- */
     if (m_transport) {
+        /* the ring follows the top-level window size (resize(), showFullScreen(), output
+         * mode change) unless QT_IVI_GEOMETRY pins it.  Done here, at present time, so a window
+         * that is resized several times before painting costs one reallocation. */
+        const QSize want(m_pmdata->width(), m_pmdata->height());
+        if (!etnaConfig().iviPinned && window() && window()->type() == Qt::Window
+                && !want.isEmpty() && m_transport->ringSize() != want) {
+            m_stale.clear();   /* new ring surfaces: every target is fully stale */
+            if (!m_transport->resizeRing(want)) {
+                BS_WARN << "flush(wayland): ring resize to" << want << "failed";
+                return;
+            }
+        }
         const QRect bounds(0, 0, etna2d_surface_width(backingSurf), etna2d_surface_height(backingSurf));
         etna2d_surface *ringBo = fakeBusy ? nullptr : m_transport->currentBo();
         if (!ringBo) {

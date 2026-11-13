@@ -7,12 +7,14 @@
  *   QT_ETNA2D_GPU_TEXT=0   glyphs on the CPU raster engine instead of the DE
  *   QT_ETNA2D_FULL_FLUSH=1 blit the whole frame on flush (no damage tracking)
  *   QT_ETNAVIV2D_NO_BATCH=1  finish the GPU on every source unlock (no batching)
+ *   QT_IVI_GEOMETRY=WxH    Wayland: pin the surface size (else it follows window / wl_output)
  *   QT_IVI_SURFACE_ID, QT_ETNAVIV2D_PLANE   read where used (integration / transport)
  * Debug (no effect on what is drawn):
  *   QT_ETNAVIV2D_DEBUG=1   log; =2 also per-second timing/counter report
  * Test hooks:
  *   QT_ETNA2D_VERIFY_FLUSH=1  compare every flushed target with the backing store
  *   QT_ETNA2D_TEST_DROP=N     pretend the target is busy on every Nth flush
+ *   QT_ETNA2D_TEST_OUTPUT=WxH Wayland: fake a wl_output mode change 1 s after the first frame
  */
 #ifndef QETNAVIV2DCONFIG_H
 #define QETNAVIV2DCONFIG_H
@@ -24,9 +26,10 @@
 
 struct EtnaConfig {
     int   debug;
-    bool  cached, gpuText, fullFlush, noBatch;
+    bool  cached, gpuText, fullFlush, noBatch, iviPinned;
     bool  verifyFlush;
     int   testDrop;
+    QSize testOutput;     /* invalid = off */
 };
 
 inline const EtnaConfig &etnaConfig()
@@ -40,8 +43,12 @@ inline const EtnaConfig &etnaConfig()
         k.gpuText     = def("QT_ETNA2D_GPU_TEXT");
         k.fullFlush   = on("QT_ETNA2D_FULL_FLUSH");
         k.noBatch     = on("QT_ETNAVIV2D_NO_BATCH");
+        k.iviPinned   = !qEnvironmentVariableIsEmpty("QT_IVI_GEOMETRY");
         k.verifyFlush = on("QT_ETNA2D_VERIFY_FLUSH");
         k.testDrop    = qEnvironmentVariableIntValue("QT_ETNA2D_TEST_DROP");
+        const QList<QByteArray> p = qgetenv("QT_ETNA2D_TEST_OUTPUT").split('x');
+        k.testOutput  = (p.size() == 2 && p[0].toInt() > 0 && p[1].toInt() > 0)
+                            ? QSize(p[0].toInt(), p[1].toInt()) : QSize();
         return k;
     }();
     return c;

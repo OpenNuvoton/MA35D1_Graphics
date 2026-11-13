@@ -158,7 +158,7 @@ public:
     /* Update screen geometry after the Wayland configure round-trip.
      * Only meaningful in plane=wayland mode; updates mGeometry + mPhysicalSize
      * and notifies Qt so the window system sees the correct output size. */
-    void setWaylandGeometry(const QRect &geo);
+    void setWaylandGeometry(const QRect &geo, const QSizeF &physMm = QSizeF());
 
     /* ---- Composite-mode video API (plane=composite only) ---- */
 

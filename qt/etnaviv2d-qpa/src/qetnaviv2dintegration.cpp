@@ -170,6 +170,11 @@ bool QEtnaviv2dIntegration::initializeHardware()
         /* Update screen geometry to match what Weston reported */
         QRect geo = m_waylandTransport->outputGeometry();
         m_screen->setWaylandGeometry(geo);
+        /* follow later wl_output mode changes (screen geometry -> fullscreen windows
+         * resize -> the backing store resizes the ring on its next flush). */
+        m_waylandTransport->setOutputHook([this](const QRect &g, const QSizeF &mm) {
+            if (m_screen) m_screen->setWaylandGeometry(g, mm);
+        });
 
         if (!m_waylandTransport->allocateRing()) {
             INTG_WARN << "QEtnaviv2dWaylandTransport::allocateRing() failed";
