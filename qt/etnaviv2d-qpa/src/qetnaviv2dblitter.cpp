@@ -24,6 +24,11 @@
 #include <QMutexLocker>
 #include <QtGui/private/qpixmap_blitter_p.h>
 #include <qpa/qplatformpixmap.h>
+#include <QtGui/private/qtextureglyphcache_p.h>
+#include <QtGui/private/qpaintengine_raster_p.h>
+#include <QtGui/private/qfontengine_p.h>
+#include <QtGui/private/qtextengine_p.h>
+#include <QtGui/private/qstatictext_p.h>
 
 QT_BEGIN_NAMESPACE
 
@@ -116,7 +121,8 @@ EtnaBlittable::EtnaBlittable(etna2d_context *ctx, etna2d_surface *surf)
                               | SourcePixmapCapability
                               | SourceOverPixmapCapability
                               | SourceOverScaledPixmapCapability
-                              | OpacityPixmapCapability))
+                              | OpacityPixmapCapability
+                              | (etnaConfig().gpuText ? DrawScaledCachedGlyphsCapability : Capability(0))))
     , m_ctx(ctx)
     , m_surf(surf)
 {
@@ -363,7 +369,14 @@ void EtnaBlittable::drawPixmapOpacity(const QRectF &rect, const QPixmap &pixmap,
              << "opacity=" << opacity;
 
     if (hasOpacity) {
-        /* libetna2d has no global-opacity blend. */
+        /* Global-opacity blit (probed on the GC520): source-over of a premultiplied source
+         * scaled by the painter opacity.  Scaled and non-source-over variants stay on the CPU. */
+        if (!isStretch && isOver) {
+            EtnaStats::add(EtnaStats::GpuBlit);
+            etna2d_blit_opacity(m_ctx, srcSurf, srcR.x(), srcR.y(), m_surf, dstR.x(), dstR.y(),
+                                srcR.width(), srcR.height(), unsigned(qBound(0, qRound(opacity * 255), 255)));
+            return;
+        }
         ETNA_DBG << "drawPixmapOpacity: opacity < 1.0 — CPU draw";
         cpuDrawPixmap(rect, pixmap, subrect, cmode, opacity);
         return;
@@ -497,6 +510,238 @@ void EtnaBlittable::doUnlock()
     }
     m_skipFinishOnUnlock = false; /* reset for next lock cycle */
     m_lockImage = QImage(); /* release the dangling pointer */
+}
+
+
+/* -----------------------------------------------------------------------
+ * Text on the GPU.
+ *
+ * QImageTextureGlyphCache keeps the rasterised glyphs in a QImage atlas (Format_Alpha8 for
+ * antialiased text).  We subclass it only to mirror that atlas into an A8 GPU surface (dirty
+ * rectangles are uploaded when new glyphs were added) and then draw every glyph with
+ * etna2d_mask_blit(): pen colour (straight ARGB) blended through the coverage mask.
+ * Same structure as src/plugins/platforms/directfb/qdirectfbblitter.cpp.
+ * Not handled (Qt still routes them to the raster engine, or they are ignored here): glyph formats
+ * other than A8 (mono bitmap fonts: drawn as nothing), composition modes other than SourceOver,
+ * gradient pens.  Complex clips are routed to the raster engine by Qt (no ComplexClipCapability).
+ * ----------------------------------------------------------------------- */
+namespace {
+const char s_glyphCacheKey = 0;   /* address = key for QFontEngine::glyphCache() */
+
+class EtnaGlyphCache : public QImageTextureGlyphCache
+{
+public:
+    EtnaGlyphCache(QFontEngine::GlyphFormat f, const QTransform &m) : QImageTextureGlyphCache(f, m) {}
+    ~EtnaGlyphCache() override { dropSurface(); }
+
+    void createTextureData(int w, int h) override
+    {
+        dropSurface();
+        QImageTextureGlyphCache::createTextureData(w, h);
+        m_dirty = QRect(0, 0, w, h);
+    }
+    void resizeTextureData(int w, int h) override
+    {
+        dropSurface();
+        QImageTextureGlyphCache::resizeTextureData(w, h);
+        m_dirty = QRect(0, 0, w, h);
+    }
+    void fillTexture(const Coord &c, glyph_t g, QFixed sp) override
+    {
+        QImageTextureGlyphCache::fillTexture(c, g, sp);
+        m_dirty |= QRect(c.x, c.y, c.w, c.h);
+    }
+
+    /* The A8 surface holding the atlas, up to date; nullptr if not usable. */
+    etna2d_surface *sync(etna2d_context *ctx, etna2d_device *dev)
+    {
+        const QImage &im = image();
+        if (im.isNull() || im.format() != QImage::Format_Alpha8)
+            return nullptr;
+        if (!m_surf) {
+            if (etna2d_surface_create_fmt(dev, im.width(), im.height(), ETNA2D_FMT_A8, &m_surf) != ETNA2D_OK)
+                { m_surf = nullptr; return nullptr; }
+            m_dirty = QRect(0, 0, im.width(), im.height());
+        }
+        if (m_dirty.isEmpty())
+            return m_surf;
+        m_dirty &= QRect(0, 0, im.width(), im.height());
+        /* Queued glyph blits may still read the old atlas content: cpu_begin submits them and waits
+         * for the GPU work on this surface only. */
+        if (etna2d_surface_cpu_begin(ctx, m_surf) != ETNA2D_OK)
+            return nullptr;
+        uchar *base = static_cast<uchar *>(etna2d_surface_map(m_surf));
+        const uint stride = etna2d_surface_stride(m_surf);
+        for (int y = m_dirty.top(); y <= m_dirty.bottom(); ++y)
+            memcpy(base + y * stride + m_dirty.left(), im.constScanLine(y) + m_dirty.left(), m_dirty.width());
+        etna2d_surface_cpu_fini(m_surf);
+        m_dirty = QRect();
+        return m_surf;
+    }
+
+private:
+    void dropSurface()
+    {
+        if (!m_surf)
+            return;
+        etna2d_context *ctx = EtnaBlittablePlatformPixmap::context();
+        if (ctx) {                            /* null after the integration was torn down: the device is gone */
+            etna2d_finish(ctx);               /* queued blits may still use it */
+            etna2d_surface_destroy(m_surf);
+        }
+        m_surf = nullptr;
+    }
+    etna2d_surface *m_surf = nullptr;
+    QRect m_dirty;
+};
+} // namespace
+
+bool EtnaBlittable::drawCachedGlyphs(const QPaintEngineState *state, QFontEngine::GlyphFormat glyphFormat,
+                                     int numGlyphs, const glyph_t *glyphs, const QFixedPoint *positions,
+                                     QFontEngine *fontEngine)
+{
+    QMutexLocker _etnaLock(&etnaCtxMutex());
+    etna2d_device *dev = EtnaBlittablePlatformPixmap::device();
+    if (!dev)
+        return false;
+    unlock();     /* CPU raster writes (if any) must be released before the GPU reads/writes the surface */
+    void *key = const_cast<char *>(&s_glyphCacheKey);
+    auto *cache = static_cast<EtnaGlyphCache *>(fontEngine->glyphCache(key, glyphFormat, state->transform()));
+    if (!cache) {
+        cache = new EtnaGlyphCache(glyphFormat, state->transform());
+        fontEngine->setGlyphCache(key, cache);
+    }
+    cache->populate(fontEngine, numGlyphs, glyphs, positions);
+    cache->fillInPendingGlyphs();
+    etna2d_surface *atlas = cache->sync(m_ctx, dev);
+    if (!atlas) {
+        ETNA_WARN << "glyph atlas not usable (format" << int(glyphFormat) << ") — text skipped";
+        return false;
+    }
+
+    const QColor pen = state->pen().color();
+    const int alpha = qBound(0, qRound(pen.alpha() * state->opacity()), 255);
+    if (alpha == 0)
+        return true;
+    const uint32_t argb = (uint32_t(alpha) << 24) | (uint32_t(pen.red()) << 16)
+                        | (uint32_t(pen.green()) << 8) | uint32_t(pen.blue());
+
+    QRect clipR(0, 0, etna2d_surface_width(m_surf), etna2d_surface_height(m_surf));
+    const QRasterPaintEngineState *rs = static_cast<const QRasterPaintEngineState *>(state);
+    if (rs->clip && rs->clip->enabled)
+        clipR &= rs->clip->clipRect;
+    if (clipR.isEmpty())
+        return true;
+
+    const int margin = fontEngine->glyphMargin(glyphFormat);
+    m_opaqueKnown = false;
+
+    /* The mask blit is a source-over blend.  Other composition modes (rare) are drawn by the CPU
+     * raster engine from the same atlas: one premultiplied coloured image per glyph. */
+    const QPainter::CompositionMode cmode = state->compositionMode();
+    QImage *cpuDst = nullptr;
+    QScopedPointer<QPainter> cpuPainter;
+    if (cmode != QPainter::CompositionMode_SourceOver) {
+        cpuDst = lock();
+        if (!cpuDst || cpuDst->isNull())
+            return false;
+        cpuPainter.reset(new QPainter(cpuDst));
+        cpuPainter->setCompositionMode(cmode);
+        cpuPainter->setClipRect(clipR);
+    }
+
+    QVarLengthArray<etna2d_mask_rect, 128> rects;
+    for (int i = 0; i < numGlyphs; ++i) {
+        const QFixed sub = fontEngine->subPixelPositionForX(positions[i].x);
+        const QTextureGlyphCache::GlyphAndSubPixelPosition g(glyphs[i], sub);
+        const QTextureGlyphCache::Coord &c = cache->coords[g];
+        if (c.isNull())
+            continue;
+        const int x = qFloor(positions[i].x) + c.baseLineX - margin;
+        const int y = qRound(positions[i].y) - c.baseLineY - margin;
+        const QRect r = QRect(x, y, c.w, c.h) & clipR;
+        if (r.isEmpty())
+            continue;
+        if (cpuPainter) {
+            const QImage &atlasImg = cache->image();
+            QImage tmp(c.w, c.h, QImage::Format_ARGB32_Premultiplied);
+            for (int yy = 0; yy < c.h; ++yy) {
+                const uchar *m = atlasImg.constScanLine(c.y + yy) + c.x;
+                QRgb *d = reinterpret_cast<QRgb *>(tmp.scanLine(yy));
+                for (int xx = 0; xx < c.w; ++xx) {
+                    const int a = (m[xx] * alpha + 127) / 255;
+                    d[xx] = qPremultiply(qRgba(pen.red(), pen.green(), pen.blue(), a));
+                }
+            }
+            cpuPainter->drawImage(x, y, tmp);
+            continue;
+        }
+        rects.append({ c.x + (r.x() - x), c.y + (r.y() - y), r.x(), r.y(), r.width(), r.height() });
+    }
+    if (!rects.isEmpty()) {
+        EtnaStats::add(EtnaStats::GpuMask, 0, rects.size());
+        etna2d_mask_blit_n(m_ctx, atlas, m_surf, argb, rects.constData(), int(rects.size()));
+    }
+    return true;
+}
+
+
+/* -----------------------------------------------------------------------
+ * EtnaPaintEngine
+ * ----------------------------------------------------------------------- */
+QPaintEngine *EtnaBlittablePlatformPixmap::paintEngine() const
+{
+    if (!m_engine) {
+        auto *that = const_cast<EtnaBlittablePlatformPixmap *>(this);
+        that->m_engine.reset(new EtnaPaintEngine(that));
+    }
+    return m_engine.data();
+}
+
+bool EtnaPaintEngine::gpuGlyphs(int numGlyphs, const glyph_t *glyphs, const QFixedPoint *positions,
+                                QFontEngine *fe)
+{
+    if (!etnaConfig().gpuText)
+        return false;
+    QRasterPaintEngineState *s = state();
+    if (!s || s->matrix.type() > QTransform::TxScale)
+        return false;
+    if (s->clip && s->clip->enabled && !s->clip->hasRectClip)
+        return false;                                   /* complex clip: raster engine */
+    auto *rd = static_cast<QRasterPaintEnginePrivate *>(d_ptr.data());
+    const QFontEngine::GlyphFormat fmt = fe->glyphFormat != QFontEngine::Format_None ? fe->glyphFormat
+                                                                                      : rd->glyphCacheFormat;
+    if (fmt != QFontEngine::Format_A8)
+        return false;
+    auto *bl = static_cast<EtnaBlittable *>(m_pm->blittable());
+    return bl && bl->drawCachedGlyphs(s, fmt, numGlyphs, glyphs, positions, fe);
+}
+
+void EtnaPaintEngine::drawTextItem(const QPointF &p, const QTextItem &textItem)
+{
+    const QTextItemInt &ti = static_cast<const QTextItemInt &>(textItem);
+    if (ti.glyphs.numGlyphs == 0)
+        return;
+    QTransform matrix = state()->matrix;
+    if (shouldDrawCachedGlyphs(ti.fontEngine, matrix)) {
+        QVarLengthArray<QFixedPoint> positions;
+        QVarLengthArray<glyph_t> glyphs;
+        matrix.translate(p.x(), p.y());
+        ti.fontEngine->getGlyphPositions(ti.glyphs, matrix, ti.flags, glyphs, positions);
+        if (gpuGlyphs(glyphs.size(), glyphs.constData(), positions.constData(), ti.fontEngine))
+            return;
+    }
+    QBlitterPaintEngine::drawTextItem(p, textItem);
+}
+
+void EtnaPaintEngine::drawStaticTextItem(QStaticTextItem *item)
+{
+    if (item->numGlyphs == 0)
+        return;
+    if (shouldDrawCachedGlyphs(item->fontEngine(), state()->matrix)
+        && gpuGlyphs(item->numGlyphs, item->glyphs, item->glyphPositions, item->fontEngine()))
+        return;
+    QBlitterPaintEngine::drawStaticTextItem(item);
 }
 
 QT_END_NAMESPACE

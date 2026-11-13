@@ -225,6 +225,7 @@ QEtnaviv2dIntegration::~QEtnaviv2dIntegration()
         QWindowSystemInterface::handleScreenRemoved(m_screen);
     /* m_screen deleted by Qt after handleScreenRemoved */
 
+    EtnaBlittablePlatformPixmap::setGlobalContext(nullptr, nullptr);   /* glyph caches may outlive us */
     if (m_etnaCtx) {
         etna2d_context_destroy(m_etnaCtx);
         m_etnaCtx = nullptr;
