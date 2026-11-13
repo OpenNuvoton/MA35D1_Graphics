@@ -125,6 +125,7 @@ public:
     explicit EtnaPaintEngine(QBlittablePlatformPixmap *p) : QBlitterPaintEngine(p), m_pm(p) {}
     void drawTextItem(const QPointF &p, const QTextItem &textItem) override;
     void drawStaticTextItem(QStaticTextItem *item) override;
+    bool end() override;      /* submit queued GPU ops (async) so they run while the CPU keeps working */
 private:
     bool gpuGlyphs(int numGlyphs, const glyph_t *glyphs, const QFixedPoint *positions, QFontEngine *fe);
     QBlittablePlatformPixmap *m_pm;

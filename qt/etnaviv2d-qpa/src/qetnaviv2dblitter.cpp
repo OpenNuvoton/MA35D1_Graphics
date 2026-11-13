@@ -698,6 +698,17 @@ QPaintEngine *EtnaBlittablePlatformPixmap::paintEngine() const
     return m_engine.data();
 }
 
+bool EtnaPaintEngine::end()
+{
+    QMutexLocker _etnaLock(&etnaCtxMutex());
+    const bool ok = QBlitterPaintEngine::end();
+    /* Queued ops otherwise sit in the command stream until something needs them (next lock of a
+     * surface they touch, frame flush).  Submitting here is asynchronous (no wait) and lets the GPU
+     * work overlap the CPU work that follows.  A no-op when nothing is queued. */
+    etna2d_flush(EtnaBlittablePlatformPixmap::context());
+    return ok;
+}
+
 bool EtnaPaintEngine::gpuGlyphs(int numGlyphs, const glyph_t *glyphs, const QFixedPoint *positions,
                                 QFontEngine *fe)
 {
