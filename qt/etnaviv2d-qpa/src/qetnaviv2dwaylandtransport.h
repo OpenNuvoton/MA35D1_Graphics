@@ -45,6 +45,7 @@
  */
 #pragma once
 
+#include <QRegion>
 #include <QObject>
 #include <QRect>
 #include <QSocketNotifier>
@@ -133,7 +134,7 @@ public:
      *
      * bo must be the surface returned by currentBo() — this is how the
      * transport knows which slot to attach. */
-    void commitFrame(etna2d_surface *bo);
+    void commitFrame(etna2d_surface *bo, const QRegion &damage = QRegion());
 
     /* Returns the ring BO the blitter should render into for the next frame.
      * Returns nullptr if all slots are in_use (back-pressure). */
@@ -330,6 +331,7 @@ private:
     bool           m_connected         = false;
     bool           m_configured        = false; // xdg_surface configure received
     bool           m_dirty             = false; // commitFrame() called, waiting for frame cb
+    QRegion        m_commitDamage;      // union of flushed regions since the last attach/commit
     int            m_pendingCommitSlot = -1;    // slot to attach on next frame cb
 
     QSocketNotifier *m_notifier = nullptr;

@@ -366,7 +366,7 @@ void QEtnaviv2dWaylandTransport::armNotifier()
 /* -----------------------------------------------------------------------
  * commitFrame() — called from BackingStore::flush() after blitting
  * ----------------------------------------------------------------------- */
-void QEtnaviv2dWaylandTransport::commitFrame(etna2d_surface *bo)
+void QEtnaviv2dWaylandTransport::commitFrame(etna2d_surface *bo, const QRegion &damage)
 {
     /* Arm the QSocketNotifier lazily on first commit — by this point
      * QApplication::exec() is running and the notifier will work correctly. */
@@ -383,6 +383,10 @@ void QEtnaviv2dWaylandTransport::commitFrame(etna2d_surface *bo)
 
     m_pendingCommitSlot = slot;
     m_dirty = true;
+    /* Frames that were blitted but never committed (a newer frame replaced them
+     * before the frame callback) still count: damage is relative to the last
+     * buffer the compositor actually received. */
+    m_commitDamage += damage;
 
     if (!m_frameCallback) {
         /* No frame callback pending — first frame or compositor is idle.
@@ -401,9 +405,15 @@ void QEtnaviv2dWaylandTransport::doCommit(int slot)
     bo.in_use.store(true);
 
     wl_surface_attach(m_surface, bo.wl_buf, 0, 0);
-    wl_surface_damage_buffer(m_surface, 0, 0,
-                              m_outputGeometry.width(),
-                              m_outputGeometry.height());
+    {
+        QVector<QRect> rects = m_commitDamage.rects();
+        if (rects.isEmpty() || rects.size() > 16)
+            rects = { m_commitDamage.isEmpty() ? QRect(0, 0, m_outputGeometry.width(), m_outputGeometry.height())
+                                               : m_commitDamage.boundingRect() };
+        for (const QRect &r : qAsConst(rects))
+            wl_surface_damage_buffer(m_surface, r.x(), r.y(), r.width(), r.height());
+        m_commitDamage = QRegion();
+    }
 
     armFrameCallback();
     wl_surface_commit(m_surface);
