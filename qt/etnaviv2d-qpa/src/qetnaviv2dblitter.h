@@ -30,6 +30,11 @@ QT_BEGIN_NAMESPACE
  * The blitter does NOT own the etna2d_context — it is shared across all
  * blittables and lives in the integration singleton.
  * ----------------------------------------------------------------------- */
+QT_BEGIN_NAMESPACE
+class QRecursiveMutex;
+QT_END_NAMESPACE
+QRecursiveMutex &etnaCtxMutex();
+
 class EtnaBlittable : public QBlittable
 {
 public:

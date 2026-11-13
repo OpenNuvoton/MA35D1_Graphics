@@ -22,6 +22,8 @@
 #include "qetnaviv2dconfig.h"
 
 #include <QDebug>
+#include <QMutexLocker>
+#include "qetnaviv2dblitter.h"
 #include <qpa/qwindowsysteminterface.h>
 
 QT_BEGIN_NAMESPACE
@@ -93,6 +95,7 @@ void QEtnaviv2dBackingStore::flush(QWindow * /*window*/,
                                    const QRegion &region,
                                    const QPoint  &offset)
 {
+    QMutexLocker _etnaLock(&etnaCtxMutex());   /* shared GC520 queue */
     Q_UNUSED(offset); /* offset is always (0,0) for full-screen QFbScreen */
 
     if (!m_pmdata || !m_pmdata->etnaBlittable()) {
