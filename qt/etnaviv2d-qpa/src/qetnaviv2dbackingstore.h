@@ -60,8 +60,13 @@ private:
                        const QRegion &r);
 
     /* Shared by the Wayland and KMS present paths. */
+    void    deferFrame(const QRegion &region, const QRect &bounds, bool retryFromLoop);
     bool    blitToTarget(EtnaBlittable *src, etna2d_surface *target, const QRegion &region,
                          const QRect &bounds, const char *what, QRegion *copied);  /* damage -> blit -> finish -> verify */
+
+    void presentPending();                 /* present a frame dropped for lack of a free ring slot */
+    bool m_dropped = false;                /* flush() was dropped; the stale regions are waiting */
+    bool m_retryQueued = false;
 
     QHash<etna2d_surface *, QRegion> m_stale;  /* per target buffer */
     bool                         m_fullFlush = false; /* QT_ETNA2D_FULL_FLUSH=1 (A/B) */

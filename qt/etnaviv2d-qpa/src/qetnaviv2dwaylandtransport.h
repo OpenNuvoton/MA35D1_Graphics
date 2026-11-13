@@ -97,6 +97,7 @@ struct ArgbBo {
     int              dmabuf_fd = -1;     // dmabuf fd (owned; closed on destroy)
     wl_buffer       *wl_buf   = nullptr; // persistent wl_buffer (created once)
     std::atomic<bool> in_use  { false }; // true while Weston holds a reference
+    class QEtnaviv2dWaylandTransport *owner = nullptr; // for the release callback
 };
 
 /* -----------------------------------------------------------------------
@@ -134,6 +135,12 @@ public:
      *
      * bo must be the surface returned by currentBo() — this is how the
      * transport knows which slot to attach. */
+    /* called (GUI thread, from the wl_buffer.release dispatch) whenever a ring slot
+     * comes back.  The backing store uses it to present a frame it had to drop because the
+     * ring was full. */
+    void setReleaseHook(std::function<void()> hook) { m_releaseHook = std::move(hook); }
+    bool ringBusy() const;   // true if Weston still holds at least one slot
+
     void commitFrame(etna2d_surface *bo, const QRegion &damage = QRegion());
 
     /* Returns the ring BO the blitter should render into for the next frame.
@@ -331,6 +338,7 @@ private:
     bool           m_connected         = false;
     bool           m_configured        = false; // xdg_surface configure received
     bool           m_dirty             = false; // commitFrame() called, waiting for frame cb
+    std::function<void()> m_releaseHook;
     QRegion        m_commitDamage;      // union of flushed regions since the last attach/commit
     int            m_pendingCommitSlot = -1;    // slot to attach on next frame cb
 

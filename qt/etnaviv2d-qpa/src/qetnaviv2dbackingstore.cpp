@@ -23,6 +23,7 @@
 #include "qetnaviv2dconfig.h"
 
 #include <QDebug>
+#include <QTimer>
 #include <QMutexLocker>
 #include "qetnaviv2dblitter.h"
 #include <string.h>
@@ -44,6 +45,9 @@ QEtnaviv2dBackingStore::QEtnaviv2dBackingStore(QWindow *window,
     , m_transport(transport)
 {
     m_fullFlush = etnaConfig().fullFlush;
+    if (m_transport) {
+        m_transport->setReleaseHook([this]() { presentPending(); });
+    }
     BS_DBG << "created for window" << window
            << (transport ? "(wayland mode)" : "(KMS mode)");
     /* Allocate initial backing surface sized to the window. */
@@ -52,6 +56,10 @@ QEtnaviv2dBackingStore::QEtnaviv2dBackingStore(QWindow *window,
 
 QEtnaviv2dBackingStore::~QEtnaviv2dBackingStore()
 {
+    if (m_transport)
+        m_transport->setReleaseHook(nullptr);
+    if (EtnaStats::enabled())
+        fprintf(stderr, "ETNAFINAL pending_drop=%d (must be 0: a dropped frame was never presented otherwise)\n", int(m_dropped));
     BS_DBG << "destroyed";
 }
 
@@ -174,6 +182,22 @@ void QEtnaviv2dBackingStore::blitRegion(etna2d_context *ctx, etna2d_surface *src
  * Present helpers shared by the Wayland and KMS paths
  * ----------------------------------------------------------------------- */
 
+/* The target buffer is not available (ring full / flip pending): the backing store already holds
+ * the pixels, so remember the region as stale for every target and present it from the next
+ * release / flip-done event.  retryFromLoop: no event will come (QT_ETNA2D_TEST_DROP), so retry
+ * from the event loop. */
+void QEtnaviv2dBackingStore::deferFrame(const QRegion &region, const QRect &bounds, bool retryFromLoop)
+{
+    EtnaStats::add(EtnaStats::DroppedFrames);
+    accumulateStale(region, bounds);
+    m_dropped = true;
+    if (retryFromLoop && !m_retryQueued) {
+        m_retryQueued = true;
+        QTimer::singleShot(0, [this]() { m_retryQueued = false; presentPending(); });
+    }
+    BS_DBG << "flush: target busy, frame deferred";
+}
+
 /* Copy what 'target' is missing (damage tracking) from the backing surface and wait for the GPU.
  * *copied gets the copied region (may be empty); false if the GPU wait failed. */
 bool QEtnaviv2dBackingStore::blitToTarget(EtnaBlittable *src, etna2d_surface *target,
@@ -228,21 +252,24 @@ void QEtnaviv2dBackingStore::flush(QWindow * /*window*/,
     struct FrameEnd { ~FrameEnd() { if (EtnaStats::enabled()) EtnaStats::report(); } } _fe;
     EtnaStats::add(EtnaStats::Frames);
 
+    /* QT_ETNA2D_TEST_DROP=N (test): behave as if the target were busy on every Nth flush. */
+    static int flushCount = 0;
+    const int testDrop = etnaConfig().testDrop;
+    const bool fakeBusy = testDrop > 0 && ++flushCount % testDrop == 0;
+
     /* ---- Wayland mode: blit into the ring BO, hand off to transport ---- */
     if (m_transport) {
         const QRect bounds(0, 0, etna2d_surface_width(backingSurf), etna2d_surface_height(backingSurf));
-        etna2d_surface *ringBo = m_transport->currentBo();
+        etna2d_surface *ringBo = fakeBusy ? nullptr : m_transport->currentBo();
         if (!ringBo) {
-            /* All ring slots are in use — Weston hasn't released any yet.
-             * Drop the frame (back-pressure); the region stays stale for every ring slot. */
-            EtnaStats::add(EtnaStats::DroppedFrames);
-            accumulateStale(region, bounds);
-            BS_DBG << "flush: wayland ring full — dropping frame (back-pressure)";
+            /* All ring slots are held by Weston: present from wl_buffer.release */
+            deferFrame(region, bounds, /*retryFromLoop=*/!m_transport->ringBusy());
             return;
         }
         QRegion damage;
         if (!blitToTarget(blitter, ringBo, region, bounds, "wayland", &damage))
             return;
+        m_dropped = false;
         m_transport->commitFrame(ringBo, damage);   /* frame callback commits */
         return;
     }
@@ -261,9 +288,19 @@ void QEtnaviv2dBackingStore::flush(QWindow * /*window*/,
         return;
 
     /* Page-flip (blocks until vblank). */
+    m_dropped = false;
     EtnaStats::Scope _tp(EtnaStats::FlipWait);
     if (m_screen->pageFlip() != 0)
         BS_WARN << "flush(KMS): pageFlip failed";
+}
+
+void QEtnaviv2dBackingStore::presentPending()
+{
+    if (!m_dropped || !window())
+        return;
+    EtnaStats::add(EtnaStats::RelPresent);
+    BS_DBG << "presenting frame dropped earlier (ring slot available)";
+    flush(window(), QRegion(), QPoint());
 }
 
 /* -----------------------------------------------------------------------

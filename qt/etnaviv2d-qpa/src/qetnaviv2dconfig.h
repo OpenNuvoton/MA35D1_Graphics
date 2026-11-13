@@ -12,6 +12,7 @@
  *   QT_ETNAVIV2D_DEBUG=1   log; =2 also per-second timing/counter report
  * Test hooks:
  *   QT_ETNA2D_VERIFY_FLUSH=1  compare every flushed target with the backing store
+ *   QT_ETNA2D_TEST_DROP=N     pretend the target is busy on every Nth flush
  */
 #ifndef QETNAVIV2DCONFIG_H
 #define QETNAVIV2DCONFIG_H
@@ -25,6 +26,7 @@ struct EtnaConfig {
     int   debug;
     bool  cached, gpuText, fullFlush, noBatch;
     bool  verifyFlush;
+    int   testDrop;
 };
 
 inline const EtnaConfig &etnaConfig()
@@ -39,6 +41,7 @@ inline const EtnaConfig &etnaConfig()
         k.fullFlush   = on("QT_ETNA2D_FULL_FLUSH");
         k.noBatch     = on("QT_ETNAVIV2D_NO_BATCH");
         k.verifyFlush = on("QT_ETNA2D_VERIFY_FLUSH");
+        k.testDrop    = qEnvironmentVariableIntValue("QT_ETNA2D_TEST_DROP");
         return k;
     }();
     return c;
