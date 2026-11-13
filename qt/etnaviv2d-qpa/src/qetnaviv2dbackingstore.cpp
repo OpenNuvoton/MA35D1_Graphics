@@ -19,20 +19,15 @@
  */
 #include "qetnaviv2dbackingstore.h"
 #include "qetnaviv2dwaylandtransport.h"
+#include "qetnaviv2dconfig.h"
 
 #include <QDebug>
 #include <qpa/qwindowsysteminterface.h>
 
 QT_BEGIN_NAMESPACE
 
-static bool bsDebug()
-{
-    static int v = qEnvironmentVariableIntValue("QT_ETNAVIV2D_DEBUG");
-    return v > 0;
-}
-
-#define BS_DBG  if (bsDebug()) qDebug() << "[etnaviv2d|backingstore]"
-#define BS_WARN qWarning() << "[etnaviv2d|backingstore]"
+#define BS_DBG  ETNA_LOG_DBG("backingstore")
+#define BS_WARN ETNA_LOG_WARN("backingstore")
 
 /* -----------------------------------------------------------------------
  * Construction / destruction

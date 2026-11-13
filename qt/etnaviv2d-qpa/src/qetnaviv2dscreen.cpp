@@ -48,21 +48,16 @@
 #include <QMutexLocker>
 
 #include <drm_fourcc.h>
+#include "qetnaviv2dconfig.h"
 
 QT_BEGIN_NAMESPACE
 
 /* -----------------------------------------------------------------------
  * Logging
  * ----------------------------------------------------------------------- */
-static bool screenDebug()
-{
-    static int v = qEnvironmentVariableIntValue("QT_ETNAVIV2D_DEBUG");
-    return v > 0;
-}
-
-#define SCR_DBG  if (screenDebug()) qDebug() << "[etnaviv2d|screen]"
-#define SCR_WARN qWarning() << "[etnaviv2d|screen]"
-#define SCR_INFO qInfo()    << "[etnaviv2d|screen]"
+#define SCR_DBG  ETNA_LOG_DBG("screen")
+#define SCR_WARN ETNA_LOG_WARN("screen")
+#define SCR_INFO ETNA_LOG_INFO("screen")
 
 /* -----------------------------------------------------------------------
  * Vblank / page-flip event handler

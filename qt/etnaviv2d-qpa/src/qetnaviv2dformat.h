@@ -5,8 +5,6 @@
  *
  *   QT_ETNA2D_FMT       the one setting: format of the backing store, opaque pixmaps and the
  *                       ring (default argb8888 = unchanged behaviour)
- *   QT_ETNA2D_RING_FMT  debug / A-B only: overrides the ring format. A ring that differs from
- *                       the backing store costs a converting copy per frame.
  *
  * Names: argb8888 xrgb8888 rgb565 argb4444 argb1555.  argb1555 has no QImage
  * equivalent, so it is ring-only (backing store / pixmaps fall back to argb8888).
@@ -70,11 +68,9 @@ inline const EtnaFmt &etnaStorageFmt(bool alpha)
     return base;
 }
 
-/* Ring format: QT_ETNA2D_RING_FMT, else QT_ETNA2D_FMT, else argb8888. */
+/* Ring format: QT_ETNA2D_FMT as is (the ring may be an opaque format), else argb8888. */
 inline const EtnaFmt &etnaRingFmt()
 {
-    const QByteArray r = qgetenv("QT_ETNA2D_RING_FMT");
-    if (!r.isEmpty()) return etnaFmtByName(r);
     return etnaFmtByName(qgetenv("QT_ETNA2D_FMT"));
 }
 

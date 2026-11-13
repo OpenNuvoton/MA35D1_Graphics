@@ -49,6 +49,8 @@ HEADERS = \
     src/qetnaviv2dscreen.h               \
     src/qetnaviv2dblitter.h              \
     src/qetnaviv2dbackingstore.h         \
+    src/qetnaviv2dconfig.h               \
+    src/qetnaviv2dstats.h                \
     src/qetnaviv2dwaylandtransport.h
 
 INCLUDEPATH += $$PWD/src

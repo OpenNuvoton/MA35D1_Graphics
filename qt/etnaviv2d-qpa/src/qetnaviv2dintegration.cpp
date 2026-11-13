@@ -18,6 +18,7 @@
  * Reference: qlinuxfbintegration.cpp, qdirectfbintegration.cpp
  */
 #include "qetnaviv2dintegration.h"
+#include "qetnaviv2dconfig.h"
 #include "qetnaviv2dblitter.h"
 #include "qetnaviv2dscreen.h"
 #include "qetnaviv2dbackingstore.h"
@@ -55,9 +56,9 @@
 
 QT_BEGIN_NAMESPACE
 
-#define INTG_DBG  if (qEnvironmentVariableIntValue("QT_ETNAVIV2D_DEBUG") > 0) qDebug() << "[etnaviv2d|integration]"
-#define INTG_WARN qWarning() << "[etnaviv2d|integration]"
-#define INTG_INFO qInfo()    << "[etnaviv2d|integration]"
+#define INTG_DBG  ETNA_LOG_DBG("integration")
+#define INTG_WARN ETNA_LOG_WARN("integration")
+#define INTG_INFO ETNA_LOG_INFO("integration")
 
 /* -----------------------------------------------------------------------
  * Parse plugin parameter string
