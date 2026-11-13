@@ -88,6 +88,8 @@ struct etna2d_context {
 	struct etna2d_device   *dev;
 	struct etna_cmd_stream *stream;
 	unsigned                pending; /* ops since last flush */
+	unsigned                dirty;   /* ops queued/submitted since the last finish: an empty
+	                                  * etna2d_finish() costs ~120 us (empty submit + wait) and is skipped */
 };
 
 /* GC520 surface base alignment (bytes). Per Vivante alignment doc, DE
@@ -548,10 +550,13 @@ int etna2d_finish(struct etna2d_context *ctx)
 {
 	if (!ctx)
 		return ETNA2D_EINVAL;
+	if (!ctx->dirty)
+		return ETNA2D_OK;                   /* nothing queued or in flight */
 	if (ctx->pending)
 		emit_pe_flush(ctx->stream);         /* one flush per submit */
 	etna_cmd_stream_finish(ctx->stream);    /* submits + waits + resets */
 	ctx->pending = 0;
+	ctx->dirty = 0;
 	return ETNA2D_OK;
 }
 
@@ -621,7 +626,7 @@ int etna2d_fill(struct etna2d_context *ctx, struct etna2d_surface *dst,
 	pe_reset(s);
 	draw_2d_rect(s, x, y, x + w, y + h);
 	op_tail(s);
-	ctx->pending++;
+	ctx->pending++, ctx->dirty = 1;
 	return ETNA2D_OK;
 }
 
@@ -708,7 +713,7 @@ int etna2d_blit(struct etna2d_context *ctx,
 	pe_reset(s);
 	draw_2d_rect(s, dx, dy, dx + w, dy + h);
 	op_tail(s);
-	ctx->pending++;
+	ctx->pending++, ctx->dirty = 1;
 	return ETNA2D_OK;
 }
 
@@ -797,7 +802,7 @@ int etna2d_stretch(struct etna2d_context *ctx,
 	 * by the DE_CLIP window (cx0,cy0)-(cx1,cy1) set above. */
 	draw_2d_rect(s, dx, dy, dx + dw, dy + dh);
 	op_tail(s);
-	ctx->pending++;
+	ctx->pending++, ctx->dirty = 1;
 	return ETNA2D_OK;
 }
 
@@ -912,7 +917,7 @@ int etna2d_stretch_batch(struct etna2d_context *ctx,
 		draw_2d_rect(s, dx, dy, dx + dw, dy + dh);
 		/* No per-rect cache flush: the DE processes DRAW_2D in order and
 		 * the batch is flushed once at submit time. */
-		ctx->pending++;
+		ctx->pending++, ctx->dirty = 1;
 		since_flush++;
 	}
 	return ETNA2D_OK;
