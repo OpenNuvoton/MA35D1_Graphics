@@ -3,6 +3,7 @@
  *
  * Behaviour switches (default = the recommended behaviour, a switch only turns it off or A/Bs it):
  *   QT_ETNA2D_FMT          storage / scanout / ring pixel format (format.h, read there)
+ *   QT_ETNA2D_CACHED=1     cacheable BOs instead of write-combined (opt-in)
  *   QT_ETNAVIV2D_NO_BATCH=1  finish the GPU on every source unlock (no batching)
  *   QT_IVI_SURFACE_ID, QT_ETNAVIV2D_PLANE   read where used (integration / transport)
  * Debug (no effect on what is drawn):
@@ -18,7 +19,7 @@
 
 struct EtnaConfig {
     int   debug;
-    bool  noBatch;
+    bool  cached, noBatch;
 };
 
 inline const EtnaConfig &etnaConfig()
@@ -27,6 +28,7 @@ inline const EtnaConfig &etnaConfig()
         EtnaConfig k;
         auto on  = [](const char *n) { return qEnvironmentVariableIntValue(n) != 0; };
         k.debug       = qEnvironmentVariableIntValue("QT_ETNAVIV2D_DEBUG");
+        k.cached      = on("QT_ETNA2D_CACHED");
         k.noBatch     = on("QT_ETNAVIV2D_NO_BATCH");
         return k;
     }();

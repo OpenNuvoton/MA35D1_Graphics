@@ -93,8 +93,11 @@ QBlittable *EtnaBlittablePlatformPixmap::createBlittable(const QSize &size,
         return nullptr;
     }
     etna2d_surface *surf = nullptr;
-    int rc = etna2d_surface_create_fmt(s_dev, size.width(), size.height(),
-                                       etnaStorageFmt(alpha).etna, &surf);
+    /* Surfaces the CPU rasterises into are cacheable; QT_ETNA2D_CACHED=1 opts in (default write-combine). */
+    const bool cached = etnaConfig().cached;
+    int rc = etna2d_surface_create_ex(s_dev, size.width(), size.height(),
+                                      etnaStorageFmt(alpha).etna,
+                                      cached ? ETNA2D_SURF_CACHED : 0, &surf);
     if (rc != ETNA2D_OK || !surf) {
         ETNA_WARN << "etna2d_surface_create failed rc=" << rc
                   << "size=" << size;
@@ -444,7 +447,13 @@ QImage *EtnaBlittable::doLock()
     /* Finish any pending GPU work so CPU reads see up-to-date pixels. */
     {
         EtnaStats::Scope _t(EtnaStats::LockFinish);
-        etna2d_finish(m_ctx);
+        if (etna2d_surface_is_cached(m_surf)) {
+            /* Submit queued ops, wait only for GPU work on this surface, invalidate the CPU cache. */
+            if (etna2d_surface_cpu_begin(m_ctx, m_surf) != ETNA2D_OK)
+                etna2d_finish(m_ctx);
+        } else {
+            etna2d_finish(m_ctx);
+        }
     }
 
     void *ptr = etna2d_surface_map(m_surf);
@@ -478,7 +487,9 @@ void EtnaBlittable::doUnlock()
                                       : "cpu_fini + finish");
     /* WC drain barrier: ensures CPU writes are visible before GPU reads. */
     etna2d_surface_cpu_fini(m_surf);
-    if (!m_skipFinishOnUnlock) {
+    /* A cached surface needs no finish here: cpu_fini already cleaned the CPU cache
+     * synchronously and the next GPU submit is ordered after it. */
+    if (!m_skipFinishOnUnlock && !etna2d_surface_is_cached(m_surf)) {
         /* Full flush: wait for all queued GPU ops (used for dst surfaces
          * and at frame boundary). */
         EtnaStats::Scope _t(EtnaStats::UnlockFinish);
