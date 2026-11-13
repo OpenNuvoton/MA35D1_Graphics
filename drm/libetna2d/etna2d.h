@@ -131,7 +131,22 @@ uint32_t etna2d_surface_stride(const struct etna2d_surface *s);
  * before a GPU op reads the surface, call etna2d_surface_cpu_fini() to
  * flush the write-combine buffer. */
 void *etna2d_surface_map(struct etna2d_surface *s);
-void  etna2d_surface_cpu_fini(struct etna2d_surface *s); /* WC drain barrier */
+void  etna2d_surface_cpu_fini(struct etna2d_surface *s); /* end of CPU access: WC drain barrier,
+                                                            for a cached surface also cleans the CPU cache */
+
+/* Cacheable surfaces for CPU-rendered content (Qt raster fallback): the CPU map is
+ * normal cached memory (fast reads and read-modify-write), the kernel does the cache
+ * maintenance in cpu_begin / cpu_fini.  Every CPU access of such a surface MUST be
+ * bracketed by etna2d_surface_cpu_begin() ... etna2d_surface_cpu_fini().
+ * Keep write-combine (the default) for scan-out / ring buffers. */
+#define ETNA2D_SURF_CACHED 0x1
+int  etna2d_surface_create_ex(struct etna2d_device *dev, int w, int h, int fmt,
+			      unsigned flags, struct etna2d_surface **out);
+/* Start of CPU access: submits queued ops (ctx may be NULL), waits only for the GPU
+ * work on THIS surface (not for the whole context), invalidates the CPU cache.
+ * Works for WC surfaces too (then it is just the per-surface wait). */
+int  etna2d_surface_cpu_begin(struct etna2d_context *ctx, struct etna2d_surface *s);
+int  etna2d_surface_is_cached(const struct etna2d_surface *s);
 
 /* ---------------------------------------------------------------------- */
 /* Context (batched command stream)                                       */

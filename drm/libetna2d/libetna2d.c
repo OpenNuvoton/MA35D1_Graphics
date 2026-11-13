@@ -80,6 +80,8 @@ struct etna2d_surface {
 	void                 *map;
 	int                   imported; /* from dma-buf: don't assume ownership sizing */
 	int                   fmt;      /* ETNA2D_FMT_*; 0 = ARGB8888 (default) */
+	int                   cached;   /* ETNA2D_SURF_CACHED: CPU map is cacheable, needs prep/fini */
+	int                   prepped;  /* between cpu_begin and cpu_fini */
 };
 
 struct etna2d_context {
@@ -350,6 +352,12 @@ int etna2d_surface_create(struct etna2d_device *dev, int w, int h,
 int etna2d_surface_create_fmt(struct etna2d_device *dev, int w, int h, int fmt,
 			      struct etna2d_surface **out)
 {
+	return etna2d_surface_create_ex(dev, w, h, fmt, 0, out);
+}
+
+int etna2d_surface_create_ex(struct etna2d_device *dev, int w, int h, int fmt,
+			     unsigned flags, struct etna2d_surface **out)
+{
 	struct etna2d_surface *s;
 	uint32_t stride, size;
 
@@ -363,7 +371,8 @@ int etna2d_surface_create_fmt(struct etna2d_device *dev, int w, int h, int fmt,
 	if (!s)
 		return ETNA2D_ENOMEM;
 
-	s->bo = etna_bo_new(dev->dev, size, ETNA_BO_WC);
+	s->bo = etna_bo_new(dev->dev, size,
+			    (flags & ETNA2D_SURF_CACHED) ? ETNA_BO_CACHED : ETNA_BO_WC);
 	if (!s->bo) {
 		LOG_ERR("etna_bo_new(%u): %m", size);
 		free(s);
@@ -374,6 +383,7 @@ int etna2d_surface_create_fmt(struct etna2d_device *dev, int w, int h, int fmt,
 	s->h = h;
 	s->stride = stride;
 	s->fmt = fmt;
+	s->cached = !!(flags & ETNA2D_SURF_CACHED);
 	LOG_DBG("surface %dx%d stride=%u size=%u handle=%u",
 		w, h, stride, size, etna_bo_handle(s->bo));
 	*out = s;
@@ -445,12 +455,36 @@ void *etna2d_surface_map(struct etna2d_surface *s)
 	return s->map;
 }
 
+int etna2d_surface_cpu_begin(struct etna2d_context *ctx, struct etna2d_surface *s)
+{
+	if (!s)
+		return ETNA2D_EINVAL;
+	/* Queued ops are not known to the kernel until submitted. */
+	if (ctx && ctx->pending)
+		etna2d_flush(ctx);
+	/* The kernel waits for every fence on this BO (GPU readers and writers)
+	 * and, for cached BOs, invalidates the CPU cache. */
+	if (etna_bo_cpu_prep(s->bo, ETNA_PREP_READ | ETNA_PREP_WRITE)) {
+		LOG_ERR("etna_bo_cpu_prep: %m");
+		return ETNA2D_EIO;
+	}
+	s->prepped = 1;
+	return ETNA2D_OK;
+}
+
 void etna2d_surface_cpu_fini(struct etna2d_surface *s)
 {
-	(void)s;
+	if (!s)
+		return;
+	if (s->prepped) {                       /* cached BO: clean the CPU cache for the GPU */
+		etna_bo_cpu_fini(s->bo);
+		s->prepped = 0;
+	}
 	/* WC mappings need a store barrier before the GPU reads the pixels. */
 	__sync_synchronize();
 }
+
+int etna2d_surface_is_cached(const struct etna2d_surface *s) { return s ? s->cached : 0; }
 
 /* ---------------------------------------------------------------------- */
 /* Context                                                                */
