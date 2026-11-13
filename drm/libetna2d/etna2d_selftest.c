@@ -239,6 +239,49 @@ int main(int argc, char **argv)
 		   dp[(H/2)*W + (W/2)] == 0xff111111u);
 	}
 
+	/* 16-bit formats : solid fill, 1:1 copy and premultiplied SrcOver per format.
+	 * Expected value computed in the destination format (round-to-nearest or truncate: +-1 LSB). */
+	{
+		static const struct { const char *n; int fmt; int ab, rb, gb; } F[] = {
+			{ "ARGB4444", ETNA2D_FMT_ARGB4444, 4, 4, 4 },
+			{ "ARGB1555", ETNA2D_FMT_ARGB1555, 1, 5, 5 },
+			{ "RGB565",   ETNA2D_FMT_RGB565,   0, 5, 6 },
+		};
+		for (unsigned f = 0; f < sizeof(F) / sizeof(F[0]); ++f) {
+			struct etna2d_surface *a = NULL, *b = NULL;
+			char msg[96];
+			const int w = 32, h = 32;
+			int c1 = etna2d_surface_create_fmt(dev, w, h, F[f].fmt, &a) == ETNA2D_OK;
+			int c2 = etna2d_surface_create_fmt(dev, w, h, F[f].fmt, &b) == ETNA2D_OK;
+			snprintf(msg, sizeof msg, "%s: create", F[f].n);
+			ok(msg, c1 && c2);
+			if (!c1 || !c2) { etna2d_surface_destroy(a); etna2d_surface_destroy(b); continue; }
+
+			etna2d_fill(ctx, a, 0, 0, w, h, 0xffff8000u);        /* opaque orange */
+			etna2d_fill(ctx, b, 0, 0, w, h, 0xff000000u);
+			etna2d_blit(ctx, a, 0, 0, b, 0, 0, 16, 16, ETNA2D_BLEND_NONE, 0);
+			etna2d_finish(ctx);
+			{
+				uint16_t *bp16 = etna2d_surface_map(b), *ap16 = etna2d_surface_map(a);
+				snprintf(msg, sizeof msg, "%s: fill uniform, copy matches fill", F[f].n);
+				ok(msg, ap16[0] == ap16[w * h - 1] && bp16[5 * w + 5] == ap16[0]);
+				snprintf(msg, sizeof msg, "%s: copy clipped to 16x16", F[f].n);
+				ok(msg, bp16[20 * w + 20] != ap16[0] && bp16[5 * w + 20] != ap16[0]);
+			}
+
+			/* SrcOver: opaque src over any dst must equal src (formats with alpha: src opaque) */
+			etna2d_fill(ctx, b, 0, 0, w, h, 0xff102030u);
+			etna2d_blend_over(ctx, a, b, 0, 0, w, h);
+			etna2d_finish(ctx);
+			{
+				uint16_t *bp16 = etna2d_surface_map(b), *ap16 = etna2d_surface_map(a);
+				snprintf(msg, sizeof msg, "%s: SrcOver opaque == src", F[f].n);
+				ok(msg, bp16[7 * w + 7] == ap16[0]);
+			}
+			etna2d_surface_destroy(a); etna2d_surface_destroy(b);
+		}
+	}
+
 out:
 	etna2d_context_destroy(ctx);
 	etna2d_surface_destroy(big);
