@@ -47,6 +47,9 @@ QEtnaviv2dBackingStore::QEtnaviv2dBackingStore(QWindow *window,
     m_fullFlush = etnaConfig().fullFlush;
     if (m_transport) {
         m_transport->setReleaseHook([this]() { presentPending(); });
+    } else if (m_screen && m_screen->asyncFlip()) {
+        m_screen->armFlipNotifier();
+        m_screen->setFlipDoneHook([this]() { presentPending(); });
     }
     BS_DBG << "created for window" << window
            << (transport ? "(wayland mode)" : "(KMS mode)");
@@ -58,6 +61,8 @@ QEtnaviv2dBackingStore::~QEtnaviv2dBackingStore()
 {
     if (m_transport)
         m_transport->setReleaseHook(nullptr);
+    else if (m_screen)
+        m_screen->setFlipDoneHook(nullptr);
     if (EtnaStats::enabled())
         fprintf(stderr, "ETNAFINAL pending_drop=%d (must be 0: a dropped frame was never presented otherwise)\n", int(m_dropped));
     BS_DBG << "destroyed";
@@ -293,13 +298,24 @@ void QEtnaviv2dBackingStore::flush(QWindow * /*window*/,
         return;
     }
 
-    const QRect bounds(0, 0, etna2d_surface_width(backingSurf), etna2d_surface_height(backingSurf));
+    /* Fixed screen: the scanout is the connector mode; a larger window is clipped to
+     * it, a smaller one leaves the (black-cleared) rest untouched. */
+    const QRect bounds = QRect(0, 0, etna2d_surface_width(backingSurf), etna2d_surface_height(backingSurf))
+                             .intersected(QRect(0, 0, etna2d_surface_width(scanoutBack),
+                                                      etna2d_surface_height(scanoutBack)));
+
+    /* Non-blocking flip: while the previous flip is in flight the back buffer is not ours;
+     * present from the flip-done hook. */
+    if (m_screen->asyncFlip() && (fakeBusy || m_screen->flipBusy())) {
+        deferFrame(region, bounds, /*retryFromLoop=*/fakeBusy);
+        return;
+    }
 
     QRegion damage;
     if (!blitToTarget(blitter, scanoutBack, region, bounds, "kms", &damage))
         return;
 
-    /* Page-flip (blocks until vblank). */
+    /* Blocks until vblank only with QT_ETNA2D_SYNC_FLIP=1. */
     m_dropped = false;
     EtnaStats::Scope _tp(EtnaStats::FlipWait);
     if (m_screen->pageFlip() != 0)

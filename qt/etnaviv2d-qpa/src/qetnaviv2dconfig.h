@@ -6,6 +6,7 @@
  *   QT_ETNA2D_CACHED=1     cacheable BOs instead of write-combined (opt-in)
  *   QT_ETNA2D_GPU_TEXT=0   glyphs on the CPU raster engine instead of the DE
  *   QT_ETNA2D_FULL_FLUSH=1 blit the whole frame on flush (no damage tracking)
+ *   QT_ETNA2D_SYNC_FLIP=1  KMS: pageFlip() waits for vblank (no event-driven flip)
  *   QT_ETNAVIV2D_NO_BATCH=1  finish the GPU on every source unlock (no batching)
  *   QT_IVI_GEOMETRY=WxH    Wayland: pin the surface size (else it follows window / wl_output)
  *   QT_IVI_SURFACE_ID, QT_ETNAVIV2D_PLANE   read where used (integration / transport)
@@ -26,7 +27,7 @@
 
 struct EtnaConfig {
     int   debug;
-    bool  cached, gpuText, fullFlush, noBatch, iviPinned;
+    bool  cached, gpuText, fullFlush, syncFlip, noBatch, iviPinned;
     bool  verifyFlush;
     int   testDrop;
     QSize testOutput;     /* invalid = off */
@@ -42,6 +43,7 @@ inline const EtnaConfig &etnaConfig()
         k.cached      = on("QT_ETNA2D_CACHED");
         k.gpuText     = def("QT_ETNA2D_GPU_TEXT");
         k.fullFlush   = on("QT_ETNA2D_FULL_FLUSH");
+        k.syncFlip    = on("QT_ETNA2D_SYNC_FLIP");
         k.noBatch     = on("QT_ETNAVIV2D_NO_BATCH");
         k.iviPinned   = !qEnvironmentVariableIsEmpty("QT_IVI_GEOMETRY");
         k.verifyFlush = on("QT_ETNA2D_VERIFY_FLUSH");
