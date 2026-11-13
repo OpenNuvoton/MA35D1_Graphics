@@ -94,6 +94,11 @@ bool QEtnaviv2dWaylandTransport::connect()
 
     /* Roundtrip 1: receive all globals */
     wl_display_roundtrip(m_display);
+    if (m_output)
+        wl_display_roundtrip(m_display);    /* wl_output.mode arrives after the bind */
+    if (m_outModeW > 0)
+        WL_INFO << "wl_output current mode" << m_outModeW << "x" << m_outModeH
+                << "transform" << m_outTransform;
 
     if (!m_compositor || !m_dmabuf) {
         WL_WARN << "Required Wayland globals missing:"
@@ -134,15 +139,8 @@ bool QEtnaviv2dWaylandTransport::connect()
          * geometry now so connect() can return immediately.  The actual
          * configure event (0×0) will arrive later and is a no-op here. */
         {
-            int w = 1024, h = 600;
-            const QByteArray geo = qgetenv("QT_IVI_GEOMETRY");
-            if (!geo.isEmpty()) {
-                const QList<QByteArray> parts = geo.split('x');
-                if (parts.size() == 2) {
-                    w = parts[0].toInt();
-                    h = parts[1].toInt();
-                }
-            }
+            const QSize sz = defaultSize();
+            const int w = sz.width(), h = sz.height();
             m_outputGeometry = QRect(0, 0, w, h);
             m_configured = true;
         }
@@ -505,6 +503,7 @@ void QEtnaviv2dWaylandTransport::disconnect()
     m_cursorShmSize = 0;
     m_cursorBufferReady = false;
     if (m_shm)         { wl_shm_destroy(m_shm);                m_shm         = nullptr; }
+    if (m_output)      { wl_output_destroy(m_output);          m_output      = nullptr; }
     if (m_compositor)  { wl_compositor_destroy(m_compositor);  m_compositor  = nullptr; }
     if (m_registry)    { wl_registry_destroy(m_registry);      m_registry    = nullptr; }
     if (m_display)     { wl_display_disconnect(m_display);     m_display     = nullptr; }
@@ -537,6 +536,46 @@ void QEtnaviv2dWaylandTransport::onAboutToBlock()
 /* -----------------------------------------------------------------------
  * wl_registry listeners
  * ----------------------------------------------------------------------- */
+void QEtnaviv2dWaylandTransport::outputGeometry(void *data, wl_output *, int32_t, int32_t,
+                                                int32_t physW, int32_t physH, int32_t, const char *,
+                                                const char *, int32_t transform)
+{
+    auto *self = static_cast<QEtnaviv2dWaylandTransport *>(data);
+    self->m_outTransform = transform;
+    self->m_outPhysW = physW; self->m_outPhysH = physH;
+}
+
+void QEtnaviv2dWaylandTransport::outputMode(void *data, wl_output *, uint32_t flags,
+                                            int32_t width, int32_t height, int32_t)
+{
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
+        auto *self = static_cast<QEtnaviv2dWaylandTransport *>(data);
+        self->m_outModeW = width;
+        self->m_outModeH = height;
+    }
+}
+
+void QEtnaviv2dWaylandTransport::outputDone(void *, wl_output *) {}
+
+void QEtnaviv2dWaylandTransport::outputScale(void *, wl_output *, int32_t) {}
+
+/* Default window size: QT_IVI_GEOMETRY override, else the wl_output current mode (rotated
+ * transforms swap it), else 1024x600. */
+QSize QEtnaviv2dWaylandTransport::defaultSize() const
+{
+    const QByteArray geo = qgetenv("QT_IVI_GEOMETRY");
+    if (!geo.isEmpty()) {
+        const QList<QByteArray> parts = geo.split('x');
+        if (parts.size() == 2 && parts[0].toInt() > 0 && parts[1].toInt() > 0)
+            return QSize(parts[0].toInt(), parts[1].toInt());
+    }
+    if (m_outModeW > 0 && m_outModeH > 0) {
+        const bool swap = (m_outTransform & 1);   /* 90 / 270 (and flipped variants) */
+        return swap ? QSize(m_outModeH, m_outModeW) : QSize(m_outModeW, m_outModeH);
+    }
+    return QSize(1024, 600);
+}
+
 void QEtnaviv2dWaylandTransport::registryGlobal(void *data,
                                                  wl_registry *reg,
                                                  uint32_t name,
@@ -572,6 +611,14 @@ void QEtnaviv2dWaylandTransport::registryGlobal(void *data,
             seatName
         };
         wl_seat_add_listener(self->m_seat, &seat_listener, self);
+    } else if (strcmp(iface, wl_output_interface.name) == 0 && !self->m_output) {
+        /* first output only; its current mode is the default window size. */
+        self->m_output = static_cast<wl_output *>(
+            wl_registry_bind(reg, name, &wl_output_interface, qMin(version, 2u)));
+        static const wl_output_listener out_listener = {
+            outputGeometry, outputMode, outputDone, outputScale
+        };
+        wl_output_add_listener(self->m_output, &out_listener, self);
     } else if (strcmp(iface, wl_shm_interface.name) == 0) {
         /* Hardware cursor: bind wl_shm for the 32x32 ARGB8888 cursor buffer */
         self->m_shm = static_cast<wl_shm *>(
@@ -667,22 +714,10 @@ void QEtnaviv2dWaylandTransport::iviSurfaceConfigure(void *data,
 {
     auto *self = static_cast<QEtnaviv2dWaylandTransport *>(data);
     if (!self->m_configured) {
-        /* ivi-shell always sends 0×0 — fall back to the known panel size.
-         * A wl_output listener could supply the real size, but for this
-         * hardware 1024×600 is fixed.  If QT_IVI_GEOMETRY is set use that. */
+        /* ivi-shell always sends 0x0 — use QT_IVI_GEOMETRY, else the wl_output mode. */
         if (width <= 0 || height <= 0) {
-            const QByteArray geo = qgetenv("QT_IVI_GEOMETRY");
-            if (!geo.isEmpty()) {
-                const QList<QByteArray> parts = geo.split('x');
-                if (parts.size() == 2) {
-                    width  = parts[0].toInt();
-                    height = parts[1].toInt();
-                }
-            }
-            if (width <= 0 || height <= 0) {
-                width  = 1024;
-                height = 600;
-            }
+            const QSize sz = self->defaultSize();
+            width = sz.width(); height = sz.height();
         }
         self->m_outputGeometry = QRect(0, 0, width, height);
         self->m_configured = true;

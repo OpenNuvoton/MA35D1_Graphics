@@ -48,6 +48,7 @@
 #include <QMutexLocker>
 
 #include <drm_fourcc.h>
+#include "qetnaviv2dformat.h"
 #include "qetnaviv2dconfig.h"
 
 QT_BEGIN_NAMESPACE
@@ -371,12 +372,19 @@ bool QEtnaviv2dScreen::initialize()
              << "props resolved; mode blob=" << m_modeBlobId;
 #endif // !ETNAVIV2D_LEGACY_KMS
 
+    /* Scanout format follows QT_ETNA2D_FMT.  The overlay plane needs alpha, the
+     * primary plane is opaque.  Default argb8888 for alpha planes / xrgb8888 when unset. */
+    const bool wantAlpha = (m_planeMode == PlaneMode::Overlay || m_planeMode == PlaneMode::Composite);
+    const EtnaFmt &sfmt = qEnvironmentVariableIsEmpty("QT_ETNA2D_FMT")
+        ? etnaFmtByName(wantAlpha ? "argb8888" : "xrgb8888")
+        : etnaStorageFmt(wantAlpha);
+
     /* --- 3. Allocate dumb BOs and DRM FBs --- */
     for (int i = 0; i < KMS_NUM_BUFS; ++i) {
         struct drm_mode_create_dumb creq = {};
         creq.width  = w;
         creq.height = h;
-        creq.bpp    = 32;
+        creq.bpp    = sfmt.bpp;
         if (drmIoctl(m_kfd, DRM_IOCTL_MODE_CREATE_DUMB, &creq)) {
             SCR_WARN << "CREATE_DUMB[" << i << "]:" << strerror(errno);
             cleanup();
@@ -391,10 +399,7 @@ bool QEtnaviv2dScreen::initialize()
         uint32_t handles[4] = {creq.handle};
         uint32_t pitches[4] = {creq.pitch};
         uint32_t offsets[4] = {};
-        uint32_t fmt = (m_planeMode == PlaneMode::Overlay ||
-                        m_planeMode == PlaneMode::Composite)
-                       ? DRM_FORMAT_ARGB8888
-                       : DRM_FORMAT_XRGB8888;
+        uint32_t fmt = sfmt.drm;
         if (drmModeAddFB2(m_kfd, w, h, fmt,
                           handles, pitches, offsets, &m_fb[i].fb_id, 0)) {
             SCR_WARN << "drmModeAddFB2[" << i << "]:" << strerror(errno);
@@ -414,9 +419,9 @@ bool QEtnaviv2dScreen::initialize()
             cleanup();
             return false;
         }
-        int rc = etna2d_surface_from_dmabuf(m_etnadev, m_dmabuf[i],
-                                            w, h, m_fb[i].stride,
-                                            &m_scanoutSurf[i]);
+        int rc = etna2d_surface_from_dmabuf_fmt(m_etnadev, m_dmabuf[i],
+                                                w, h, m_fb[i].stride, sfmt.etna,
+                                                &m_scanoutSurf[i]);
         if (rc != ETNA2D_OK || !m_scanoutSurf[i]) {
             SCR_WARN << "etna2d_surface_from_dmabuf[" << i << "] rc=" << rc;
             cleanup();
@@ -558,7 +563,7 @@ bool QEtnaviv2dScreen::initialize()
 
     /* --- 6. Fill QFbScreen fields --- */
     mGeometry    = QRect(0, 0, w, h);
-    mDepth       = 32;
+    mDepth       = 32;      /* QFbScreen/backing store stay 32-bit; the scanout copy converts */
     mFormat      = QImage::Format_ARGB32_Premultiplied;
 
     /* Physical size — read from connector above; fall back to 96 dpi. */
