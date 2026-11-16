@@ -1,6 +1,7 @@
-# etnaviv2d_benchmark — GPU vs CPU frame-rate benchmark
+# etnaviv2d_benchmark — Qt 2D benchmark (sprite clip + 2D ops table)
 #
-# Build once, run with two different QT_QPA_PLATFORM values to compare.
+# Build once, run with two different QT_QPA_PLATFORM values to compare
+# (linuxfb vs etnaviv2d). Only needs QtWidgets public API.
 
 TARGET = etnaviv2d_benchmark
 

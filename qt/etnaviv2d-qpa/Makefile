@@ -2,26 +2,28 @@
 #
 # The plugin itself is built directly with qetnaviv2d.pro (qmake qetnaviv2d.pro
 # && make) - no wrapper needed. This Makefile only builds the standalone
-# benchmark test, which needs an IN-TREE Qt5 build directory (not a
-# staged/installed Qt SDK) for its private headers - a staged qmake doesn't
-# expose those.
+# benchmark test (etnaviv2d_benchmark), which only uses public QtWidgets API,
+# so any Qt5 qmake works (in-tree build dir or staged/installed host qmake).
 #
 # Build:
-#   make QT_BUILD=/path/to/qt5base/build/tree
+#   make QT_BUILD=/path/to/qt5base/build/tree     (uses $(QT_BUILD)/bin/qmake)
+#   make QMAKE=/path/to/qmake
 #
-#   QT_BUILD must be a Qt5 *build* tree (i.e. you ran `configure && make`
-#   there yourself), not an installed/staged Qt.
+# Run (--clip or --ops, see source header):
+#   QT_QPA_PLATFORM=linuxfb ./etnaviv2d_benchmark --ops
+#   QT_QPA_PLATFORM=etnaviv2d:plane=primary ./etnaviv2d_benchmark --clip
 #
 # Targets:
 #   make all/tests   — build etnaviv2d_benchmark
 #   make clean       — remove build output (does NOT clean Qt build tree)
 
 QT_BUILD  ?=
+ifeq ($(origin QMAKE),undefined)
 ifeq ($(strip $(QT_BUILD)),)
-$(error QT_BUILD is not set - point it at a Qt5 build tree, e.g. \
-  make QT_BUILD=/path/to/qt5base/build/tree)
+$(error Set QT_BUILD=/path/to/qt5 (uses bin/qmake) or QMAKE=/path/to/qmake)
 endif
 QMAKE := $(QT_BUILD)/bin/qmake
+endif
 
 BUILD_T_BENCH = build/etnaviv2d_benchmark
 
