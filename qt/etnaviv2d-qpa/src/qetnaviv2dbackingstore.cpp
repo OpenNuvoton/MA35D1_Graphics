@@ -165,7 +165,7 @@ void QEtnaviv2dBackingStore::blitRegion(etna2d_context *ctx, etna2d_surface *src
     /* Cost model(measured: full 1024x600 blit 8.7 ms = ~14 ns/px; per-op overhead
      * ~30 us = ~2100 px).  One bounding blit beats n rects when the pixels it adds cost less
      * than the (n-1) ops it saves. */
-    QVector<QRect> rects = r.rects();
+    QVector<QRect> rects(r.begin(), r.end());
     if (rects.size() > 1) {
         qint64 sum = 0;
         for (const QRect &q : qAsConst(rects)) sum += qint64(q.width()) * q.height();

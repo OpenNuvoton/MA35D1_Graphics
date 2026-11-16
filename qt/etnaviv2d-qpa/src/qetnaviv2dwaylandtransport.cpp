@@ -466,7 +466,7 @@ void QEtnaviv2dWaylandTransport::doCommit(int slot)
 
     wl_surface_attach(m_surface, bo.wl_buf, 0, 0);
     {
-        QVector<QRect> rects = m_commitDamage.rects();
+        QVector<QRect> rects(m_commitDamage.begin(), m_commitDamage.end());
         if (rects.isEmpty() || rects.size() > 16)
             rects = { m_commitDamage.isEmpty() ? QRect(QPoint(0, 0), m_ringSize)
                                                : m_commitDamage.boundingRect() };
@@ -688,9 +688,15 @@ void QEtnaviv2dWaylandTransport::registryGlobal(void *data,
         /* first output only; its current mode is the default window size. */
         self->m_output = static_cast<wl_output *>(
             wl_registry_bind(reg, name, &wl_output_interface, qMin(version, 2u)));
-        static const wl_output_listener out_listener = {
-            outputGeometry, outputMode, outputDone, outputScale
-        };
+        /* zero-init so listener members added in newer wayland (name/description) stay null */
+        static const wl_output_listener out_listener = []() {
+            wl_output_listener l = {};
+            l.geometry = outputGeometry;
+            l.mode = outputMode;
+            l.done = outputDone;
+            l.scale = outputScale;
+            return l;
+        }();
         wl_output_add_listener(self->m_output, &out_listener, self);
     } else if (strcmp(iface, wl_shm_interface.name) == 0) {
         /* Hardware cursor: bind wl_shm for the 32x32 ARGB8888 cursor buffer */
