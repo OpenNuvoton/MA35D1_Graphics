@@ -1,21 +1,29 @@
 /*
  * qetnaviv2dconfig.h — every runtime switch of the plugin, read once.
  *
- * Behaviour switches (default = the recommended behaviour, a switch only turns it off or A/Bs it):
- *   QT_ETNA2D_FMT          storage / scanout / ring pixel format (format.h, read there)
- *   QT_ETNA2D_CACHED=1     cacheable BOs instead of write-combined (opt-in)
- *   QT_ETNA2D_GPU_TEXT=0   glyphs on the CPU raster engine instead of the DE
- *   QT_ETNA2D_FULL_FLUSH=1 blit the whole frame on flush (no damage tracking)
- *   QT_ETNA2D_SYNC_FLIP=1  KMS: pageFlip() waits for vblank (no event-driven flip)
- *   QT_ETNAVIV2D_NO_BATCH=1  finish the GPU on every source unlock (no batching)
- *   QT_IVI_GEOMETRY=WxH    Wayland: pin the surface size (else it follows window / wl_output)
- *   QT_IVI_SURFACE_ID, QT_ETNAVIV2D_PLANE   read where used (integration / transport)
- * Debug (no effect on what is drawn):
- *   QT_ETNAVIV2D_DEBUG=1   log; =2 also per-second timing/counter report
- * Test hooks:
- *   QT_ETNA2D_VERIFY_FLUSH=1  compare every flushed target with the backing store
- *   QT_ETNA2D_TEST_DROP=N     pretend the target is busy on every Nth flush
- *   QT_ETNA2D_TEST_OUTPUT=WxH Wayland: fake a wl_output mode change 1 s after the first frame
+ * The defaults are the recommended behaviour; a switch only turns a feature off, opts in to an
+ * experiment, or selects a value.  "unset" means the variable is not in the environment.
+ *
+ *  Variable                  Default (unset)          Effect
+ *  ------------------------  -----------------------  ---------------------------------------------
+ * Behaviour
+ *  QT_ETNA2D_FMT             argb8888                 storage / scanout / ring pixel format (format.h)
+ *  QT_ETNA2D_CACHED          0  write-combined BOs    1 = cacheable BOs
+ *  QT_ETNA2D_GPU_TEXT        1  glyphs on the GPU     0 = glyphs on the CPU raster engine
+ *  QT_ETNA2D_FULL_FLUSH      0  damage tracking ON    1 = blit the whole frame on every flush
+ *  QT_ETNA2D_SYNC_FLIP       0  event-driven flip     1 = KMS pageFlip() blocks until vblank
+ *  QT_ETNAVIV2D_NO_BATCH     0  batching ON           1 = finish the GPU on every source unlock
+ * Placement
+ *  QT_ETNAVIV2D_PLANE        auto: "wayland" if WAYLAND_DISPLAY is set, else "primary"
+ *                            (also primary | overlay | wayland; the platform argument plane=... wins)
+ *  QT_IVI_GEOMETRY=WxH       unset: size follows window / wl_output; set: pinned (Wayland)
+ *  QT_IVI_SURFACE_ID         2000                     ivi-shell surface id (Wayland)
+ * Debug (no effect on what is drawn)
+ *  QT_ETNAVIV2D_DEBUG        0  off                   1 = log; 2 = log + per-second timing report
+ * Test hooks (off unless set)
+ *  QT_ETNA2D_VERIFY_FLUSH=1  compare every flushed target with the backing store
+ *  QT_ETNA2D_TEST_DROP=N     pretend the target is busy on every Nth flush
+ *  QT_ETNA2D_TEST_OUTPUT=WxH Wayland: fake a wl_output mode change 1 s after the first frame
  */
 #ifndef QETNAVIV2DCONFIG_H
 #define QETNAVIV2DCONFIG_H
